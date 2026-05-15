@@ -1,9 +1,12 @@
+import os
 import uuid
 import random
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+PORT = int(os.getenv("PORT", "8003"))
 
 app = FastAPI(title="Pagamento Service", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
