@@ -1,6 +1,9 @@
 import os
+import time
+import logging
+import uuid
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -8,14 +11,41 @@ app = FastAPI(title="Carrinho Service", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 CATALOGO_URL = os.getenv("CATALOGO_URL", "http://localhost:8001")
+CATALOGO_TIMEOUT = float(os.getenv("CATALOGO_TIMEOUT", "5.0"))
 
-# Mock storage: session_id -> lista de itens
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("carrinho-service")
+
 carrinhos: dict[str, list] = {}
-
 
 class ItemRequest(BaseModel):
     produto_id: int
     quantidade: int
+
+
+@app.middleware("http")
+async def add_request_id_and_log(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4())[:8])
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+
+    logger.info("[%s] Entrada %s %s", request_id, request.method, request.url.path)
+    response = await call_next(request)
+
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "[%s] Saida %s %s -> %s em %.2fms",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 
 
 @app.get("/health")
@@ -31,16 +61,21 @@ def ver_carrinho(session_id: str):
 
 
 @app.post("/carrinho/{session_id}/adicionar")
-def adicionar_item(session_id: str, item: ItemRequest):
+def adicionar_item(session_id: str, item: ItemRequest, request: Request):
     if item.quantidade <= 0:
         raise HTTPException(status_code=400, detail="Quantidade deve ser maior que zero")
 
-    # Valida produto consultando o catálogo
+    request_id = request.state.request_id
+    produto_url = f"{CATALOGO_URL}/produtos/{item.produto_id}"
+    logger.info("[%s] Consultando catalogo: GET %s", request_id, produto_url)
     try:
-        with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{CATALOGO_URL}/produtos/{item.produto_id}")
-    except httpx.ConnectError:
+        with httpx.Client(timeout=CATALOGO_TIMEOUT) as client:
+            resp = client.get(produto_url, headers={"x-request-id": request_id})
+    except httpx.RequestError as exc:
+        logger.error("[%s] Catalogo indisponivel: %s", request_id, exc)
         raise HTTPException(status_code=503, detail="Catálogo service indisponível")
+
+    logger.info("[%s] Catalogo respondeu status %s", request_id, resp.status_code)
 
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="Produto não encontrado no catálogo")

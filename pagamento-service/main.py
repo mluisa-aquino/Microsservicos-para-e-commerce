@@ -1,8 +1,10 @@
 import os
+import time
+import logging
 import uuid
 import random
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -11,7 +13,12 @@ PORT = int(os.getenv("PORT", "8003"))
 app = FastAPI(title="Pagamento Service", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Mock storage: pedido_id -> pedido
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("pagamento-service")
+
 pedidos: dict[str, dict] = {}
 
 METODOS_ACEITOS = {"cartao", "pix", "boleto"}
@@ -28,6 +35,28 @@ class CheckoutRequest(BaseModel):
     session_id: str
     itens: list[ItemPedido]
     metodo_pagamento: str
+
+
+@app.middleware("http")
+async def add_request_id_and_log(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4())[:8])
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+
+    logger.info("[%s] Entrada %s %s", request_id, request.method, request.url.path)
+    response = await call_next(request)
+
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "[%s] Saida %s %s -> %s em %.2fms",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 
 
 @app.get("/health")
