@@ -1,3 +1,20 @@
+"""
+Gateway Service
+---------------
+API Gateway que atua como ponto de entrada centralizado para os demais serviços.
+
+Funcionalidades:
+- Proxy reverso para catalog-service, cart-service e payment-service
+- Middleware de logging com rastreamento por Request ID
+- Health check agregado de todos os serviços
+- Injeção do cabeçalho X-Request-ID para rastrear requisições entre serviços
+
+O padrão API Gateway reduz o acoplamento entre o frontend e os microsserviços:
+o cliente conhece apenas o endereço do gateway, não os endereços internos.
+
+Porta padrão: 8000
+"""
+
 import os
 import time
 import logging
@@ -7,10 +24,12 @@ from fastapi import FastAPI, HTTPException, Request, Response
 
 app = FastAPI(title="API Gateway")
 
+# URLs dos serviços internos (sobrescritas via variáveis de ambiente no docker-compose)
 CATALOGO_URL = os.getenv("CATALOGO_URL", "http://localhost:8001")
 CARRINHO_URL = os.getenv("CARRINHO_URL", "http://localhost:8002")
 PAGAMENTO_URL = os.getenv("PAGAMENTO_URL", "http://localhost:8003")
 
+# Configuração do logger centralizado do gateway
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -20,6 +39,15 @@ logger = logging.getLogger("api-gateway")
 
 @app.middleware("http")
 async def add_request_id_and_log(request: Request, call_next):
+    """
+    Middleware executado em todas as requisições recebidas pelo gateway.
+
+    Responsabilidades:
+    1. Gera ou propaga o X-Request-ID para rastreamento distribuído
+       (se o cliente enviar o header, reutiliza; caso contrário, gera um novo)
+    2. Registra entrada e saída de cada requisição com tempo de resposta
+    3. Adiciona o Request-ID no cabeçalho da resposta para o cliente rastrear
+    """
     request_id = request.headers.get("x-request-id", str(uuid.uuid4())[:8])
     request.state.request_id = request_id
     started_at = time.perf_counter()
@@ -42,11 +70,17 @@ async def add_request_id_and_log(request: Request, call_next):
 
 @app.get("/health")
 def health_check():
+    """Health check do próprio gateway."""
     return {"status": "ok", "service": "gateway-service"}
 
 
 @app.get("/services/health")
 async def services_health(request: Request):
+    """
+    Verifica o status de todos os microsserviços em paralelo.
+    Retorna 'degraded' se qualquer serviço estiver indisponível.
+    Útil para monitoramento e diagnóstico do sistema.
+    """
     services = {
         "catalogo-service": CATALOGO_URL,
         "carrinho-service": CARRINHO_URL,
@@ -55,6 +89,8 @@ async def services_health(request: Request):
 
     result = {}
     request_id = request.state.request_id
+
+    # Propaga o Request-ID para os serviços internos (rastreamento distribuído)
     async with httpx.AsyncClient(timeout=3.0) as client:
         for name, url in services.items():
             try:
@@ -74,25 +110,32 @@ async def services_health(request: Request):
 
 
 async def proxy(request: Request, service_name: str, base_url: str, path: str):
+    """
+    Encaminha uma requisição HTTP para o serviço interno correspondente.
+
+    Preserva método, query params, headers e body da requisição original.
+    Remove o header 'host' para evitar conflito com o host do serviço destino.
+    Em caso de falha de conexão, retorna HTTP 503 com mensagem descritiva.
+    """
     request_id = request.state.request_id
     started_at = time.perf_counter()
     target_url = f"{base_url}{path}"
+
     logger.info(
         "[%s] Gateway roteando %s %s -> %s",
-        request_id,
-        request.method,
-        request.url.path,
-        target_url,
+        request_id, request.method, request.url.path, target_url,
     )
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         body = await request.body()
+
+        # Filtra o header 'host' para que o serviço destino receba o seu próprio host
         headers = {
             key: value
             for key, value in request.headers.items()
             if key.lower() != "host"
         }
-        headers["x-request-id"] = request_id
+        headers["x-request-id"] = request_id  # propaga rastreamento
 
         try:
             response = await client.request(
@@ -106,26 +149,18 @@ async def proxy(request: Request, service_name: str, base_url: str, path: str):
             elapsed_ms = (time.perf_counter() - started_at) * 1000
             logger.error(
                 "[%s] %s indisponivel para %s %s em %.2fms: %s",
-                request_id,
-                service_name,
-                request.method,
-                request.url.path,
-                elapsed_ms,
-                exc,
+                request_id, service_name, request.method, request.url.path, elapsed_ms, exc,
             )
             raise HTTPException(status_code=503, detail=f"{service_name} indisponivel")
 
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     logger.info(
         "[%s] %s respondeu %s para %s %s em %.2fms",
-        request_id,
-        service_name,
-        response.status_code,
-        request.method,
-        request.url.path,
-        elapsed_ms,
+        request_id, service_name, response.status_code,
+        request.method, request.url.path, elapsed_ms,
     )
 
+    # Constrói a resposta preservando status, conteúdo e content-type do serviço interno
     proxy_response = Response(
         content=response.content,
         status_code=response.status_code,
@@ -135,20 +170,26 @@ async def proxy(request: Request, service_name: str, base_url: str, path: str):
     return proxy_response
 
 
+# ── Rotas de proxy ─────────────────────────────────────────────────────────────
+# Cada grupo de rotas encaminha requisições para o serviço correspondente
+
 @app.api_route("/produtos", methods=["GET"])
 @app.api_route("/produtos/{path:path}", methods=["GET"])
 async def catalogo_proxy(request: Request, path: str = ""):
+    """Encaminha requisições de produtos para o catalog-service."""
     suffix = f"/produtos/{path}" if path else "/produtos"
     return await proxy(request, "catalogo-service", CATALOGO_URL, suffix)
 
 
 @app.api_route("/carrinho/{path:path}", methods=["GET", "POST", "DELETE"])
 async def carrinho_proxy(request: Request, path: str):
+    """Encaminha requisições de carrinho para o cart-service."""
     return await proxy(request, "carrinho-service", CARRINHO_URL, f"/carrinho/{path}")
 
 
 @app.api_route("/pagamento", methods=["GET"])
 @app.api_route("/pagamento/{path:path}", methods=["GET", "POST"])
 async def pagamento_proxy(request: Request, path: str = ""):
+    """Encaminha requisições de pagamento para o payment-service."""
     suffix = f"/pagamento/{path}" if path else "/pagamento"
     return await proxy(request, "pagamento-service", PAGAMENTO_URL, suffix)

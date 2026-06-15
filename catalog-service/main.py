@@ -1,3 +1,17 @@
+"""
+Catalog Service
+---------------
+Responsável por gerenciar o catálogo de produtos da plataforma.
+
+Funcionalidades:
+- CRUD de produtos com persistência em PostgreSQL
+- Controle de estoque em tempo real
+- Consumo de eventos do Redis Stream para decrementar estoque
+  após aprovação de pagamento (arquitetura event-driven)
+
+Porta padrão: 8001
+"""
+
 import os
 import json
 import time
@@ -10,6 +24,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# ── Configuração via variáveis de ambiente ─────────────────────────────────────
+# Permite sobrescrever valores no docker-compose sem alterar o código
 PORT      = int(os.getenv("PORT",    "8001"))
 DB_HOST   = os.getenv("DB_HOST",    "localhost")
 DB_PORT   = int(os.getenv("DB_PORT", "5434"))
@@ -18,20 +34,28 @@ DB_USER   = os.getenv("DB_USER",    "postgres")
 DB_PASS   = os.getenv("DB_PASS",    "postgres")
 REDIS_URL = os.getenv("REDIS_URL",  "redis://localhost:6379")
 
+# Identificadores do Consumer Group no Redis Stream
+# O Consumer Group garante que cada mensagem seja processada uma única vez,
+# mesmo que múltiplas instâncias deste serviço estejam rodando
 STREAM_NAME    = "payments"
 CONSUMER_GROUP = "catalog-group"
 CONSUMER_NAME  = "catalog-consumer"
 
 
 def get_db():
+    """Abre e retorna uma conexão com o banco PostgreSQL."""
     return psycopg.connect(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
         user=DB_USER, password=DB_PASS,
-        row_factory=psycopg.rows.dict_row,
+        row_factory=psycopg.rows.dict_row,  # retorna linhas como dicionários
     )
 
 
 def init_db():
+    """
+    Cria a tabela de produtos se não existir e popula com dados iniciais.
+    Executado na inicialização do serviço via lifespan.
+    """
     with get_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS products (
@@ -43,6 +67,7 @@ def init_db():
                 category    VARCHAR(100)
             )
         """)
+        # Insere produtos de demonstração apenas se o banco estiver vazio
         row = conn.execute("SELECT COUNT(*) AS n FROM products").fetchone()
         if row["n"] == 0:
             with conn.cursor() as cur:
@@ -59,8 +84,21 @@ def init_db():
 
 
 def stream_consumer():
-    """Background worker that consumes 'payment_approved' events and decrements stock in PostgreSQL."""
+    """
+    Worker em background que consome eventos do Redis Stream 'payments'.
+
+    Fluxo:
+    1. Aguarda mensagens do tipo 'payment_approved' no stream
+    2. Para cada item do pedido aprovado, decrementa o estoque no PostgreSQL
+    3. Confirma o processamento com XACK para evitar reprocessamento
+
+    Este padrão implementa consistência eventual: o estoque não é
+    decrementado no momento da compra, mas sim após a confirmação
+    assíncrona do pagamento.
+    """
     r = redis.from_url(REDIS_URL, decode_responses=True)
+
+    # Cria o Consumer Group se não existir; ignora erro caso já exista
     try:
         r.xgroup_create(STREAM_NAME, CONSUMER_GROUP, id="0", mkstream=True)
     except redis.exceptions.ResponseError:
@@ -68,45 +106,60 @@ def stream_consumer():
 
     while True:
         try:
+            # Lê até 10 mensagens, bloqueando por até 2s se não houver nenhuma
             messages = r.xreadgroup(
                 CONSUMER_GROUP, CONSUMER_NAME,
-                {STREAM_NAME: ">"},
+                {STREAM_NAME: ">"},  # ">" significa: apenas mensagens ainda não entregues
                 count=10, block=2000,
             )
             if not messages:
                 continue
+
             for _, msgs in messages:
                 for msg_id, data in msgs:
                     if data.get("type") == "payment_approved":
                         items = json.loads(data["items"])
                         with get_db() as conn:
                             for item in items:
+                                # Decrementa estoque apenas se houver quantidade suficiente,
+                                # evitando estoque negativo mesmo em condições de corrida
                                 conn.execute(
                                     """UPDATE products
                                           SET stock = stock - %s
                                         WHERE id = %s AND stock >= %s""",
                                     (item["quantity"], item["product_id"], item["quantity"]),
                                 )
+                    # Confirma processamento para que a mensagem não seja reentregue
                     r.xack(STREAM_NAME, CONSUMER_GROUP, msg_id)
+
         except Exception as e:
-            print(f"[stream-consumer] error: {e}")
-            time.sleep(1)
+            print(f"[stream-consumer] erro: {e}")
+            time.sleep(1)  # pausa antes de tentar novamente em caso de falha
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    """
+    Gerencia o ciclo de vida da aplicação:
+    - Na inicialização: cria tabelas e inicia o consumer do Redis em background
+    - No encerramento: nenhuma ação necessária (thread daemon encerra com o processo)
+    """
     init_db()
+    # Thread daemon: encerra automaticamente quando o processo principal terminar
     threading.Thread(target=stream_consumer, daemon=True).start()
     yield
 
 
 app = FastAPI(title="Catalog Service", version="2.0.0", lifespan=lifespan)
+
+# CORS aberto para permitir chamadas do frontend em qualquer origem
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── Modelos de entrada ────────────────────────────────────────────────────────
 
 class ProductCreate(BaseModel):
+    """Dados necessários para cadastrar um novo produto."""
     name: str
     price: float
     description: str
@@ -115,6 +168,7 @@ class ProductCreate(BaseModel):
 
 
 class StockUpdate(BaseModel):
+    """Payload para atualização manual de estoque."""
     stock: int
 
 
@@ -122,11 +176,20 @@ class StockUpdate(BaseModel):
 
 @app.get("/health")
 def health_check():
+    """Verifica se o serviço está operacional. Usado pelo gateway e orquestrador."""
     return {"status": "ok", "service": "catalog-service"}
 
 
 @app.get("/products")
 def list_products(skip: int = 0, limit: int = 20, category: str = None):
+    """
+    Lista produtos com suporte a paginação e filtro por categoria.
+
+    Parâmetros:
+    - skip: número de registros a pular (offset)
+    - limit: máximo de registros retornados
+    - category: filtra por categoria (busca case-insensitive)
+    """
     with get_db() as conn:
         if category:
             rows = conn.execute(
@@ -146,6 +209,7 @@ def list_products(skip: int = 0, limit: int = 20, category: str = None):
 
 @app.get("/products/{product_id}")
 def get_product(product_id: int):
+    """Retorna os dados de um produto específico pelo seu ID."""
     with get_db() as conn:
         row = conn.execute("SELECT * FROM products WHERE id = %s", (product_id,)).fetchone()
     if not row:
@@ -155,6 +219,10 @@ def get_product(product_id: int):
 
 @app.post("/products", status_code=201)
 def create_product(product: ProductCreate):
+    """
+    Cadastra um novo produto no catálogo.
+    Retorna o produto criado com o ID gerado pelo banco.
+    """
     with get_db() as conn:
         row = conn.execute(
             """INSERT INTO products (name, price, description, stock, category)
@@ -166,6 +234,10 @@ def create_product(product: ProductCreate):
 
 @app.put("/products/{product_id}/stock")
 def update_stock(product_id: int, body: StockUpdate):
+    """
+    Atualiza manualmente o estoque de um produto.
+    Usado pelo painel administrativo do frontend.
+    """
     if body.stock < 0:
         raise HTTPException(status_code=400, detail="Stock cannot be negative")
     with get_db() as conn:
