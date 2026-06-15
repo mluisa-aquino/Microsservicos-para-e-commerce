@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────────────
+
+  postgres-catalog:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB:       catalog
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata-catalog:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-payment:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB:       payment
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5435:5432"
+    volumes:
+      - pgdata-payment:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Application Services ──────────────────────────────────────────────────────
+
+  catalog-service:
+    build: ./catalog-service
+    ports:
+      - "8001:8001"
+    environment:
+      PORT:      8001
+      DB_HOST:   postgres-catalog
+      DB_PORT:   5432
+      DB_NAME:   catalog
+      DB_USER:   postgres
+      DB_PASS:   postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres-catalog:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cart-service:
+    build: ./cart-service
+    ports:
+      - "8002:8002"
+    environment:
+      PORT:        8002
+      CATALOG_URL: http://catalog-service:8001
+      PAYMENT_URL: http://payment-service:8003
+      REDIS_URL:   redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment-service:
+    build: ./payment-service
+    ports:
+      - "8003:8003"
+    environment:
+      PORT:      8003
+      DB_HOST:   postgres-payment
+      DB_PORT:   5432
+      DB_NAME:   payment
+      DB_USER:   postgres
+      DB_PASS:   postgres
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres-payment:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html
+      - ./frontend/app.js:/usr/share/nginx/html/app.js
+    depends_on:
+      - catalog-service
+      - cart-service
+      - payment-service
+
+volumes:
+  pgdata-catalog:
+  pgdata-payment:
