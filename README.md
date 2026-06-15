@@ -7,6 +7,7 @@ Plataforma de e-commerce construída com arquitetura de microsserviços usando *
 ```
 Frontend (porta 3000)
     │
+    ├── gateway-service  (porta 8000)  → Proxy reverso + logging de requests
     ├── catalog-service  (porta 8001)  → PostgreSQL + Redis Consumer
     ├── cart-service     (porta 8002)  → Redis (armazenamento do carrinho)
     └── payment-service  (porta 8003)  → PostgreSQL + Redis Stream Publisher
@@ -28,6 +29,9 @@ Usuário clica "Ir para o pagamento"
 ```
 ecommerce-microservices/
 ├── docker-compose.yml
+├── gateway-service/        # API Gateway com logging e proxy reverso
+│   ├── main.py
+│   └── requirements.txt
 ├── catalog-service/        # Gerenciamento do catálogo de produtos
 │   ├── main.py
 │   ├── requirements.txt
@@ -68,6 +72,7 @@ docker compose up --build
 
 | Serviço | URL | Documentação interativa |
 |---|---|---|
+| Gateway | http://localhost:8000 | http://localhost:8000/docs |
 | Catálogo | http://localhost:8001 | http://localhost:8001/docs |
 | Carrinho | http://localhost:8002 | http://localhost:8002/docs |
 | Pagamento | http://localhost:8003 | http://localhost:8003/docs |
@@ -100,23 +105,19 @@ docker compose up postgres-catalog postgres-payment redis
 
 ```bash
 # Terminal 1 — Catálogo (porta 8001)
-cd catalog-service
-pip install -r requirements.txt
-uvicorn main:app --port 8001 --reload
+cd catalog-service && pip install -r requirements.txt && uvicorn main:app --port 8001 --reload
 
 # Terminal 2 — Carrinho (porta 8002)
-cd cart-service
-pip install -r requirements.txt
-uvicorn main:app --port 8002 --reload
+cd cart-service && pip install -r requirements.txt && uvicorn main:app --port 8002 --reload
 
 # Terminal 3 — Pagamento (porta 8003)
-cd payment-service
-pip install -r requirements.txt
-uvicorn main:app --port 8003 --reload
+cd payment-service && pip install -r requirements.txt && uvicorn main:app --port 8003 --reload
 
-# Terminal 4 — Frontend
-cd frontend
-python -m http.server 3000
+# Terminal 4 — API Gateway (porta 8000)
+cd gateway-service && pip install -r requirements.txt && uvicorn main:app --port 8000 --reload
+
+# Terminal 5 — Frontend
+cd frontend && python -m http.server 3000
 ```
 
 Acesse **http://localhost:3000**.
@@ -124,6 +125,20 @@ Acesse **http://localhost:3000**.
 ---
 
 ## Serviços
+
+### gateway-service (porta 8000)
+
+API Gateway com proxy reverso e logging centralizado de requests.
+
+- Adiciona `X-Request-ID` em cada requisição para rastreamento
+- Roteia `/produtos`, `/carrinho` e `/pagamento` para os serviços correspondentes
+
+**Endpoints:**
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/health` | Health check do gateway |
+| GET | `/services/health` | Health check de todos os serviços |
 
 ### catalog-service (porta 8001)
 
@@ -194,6 +209,7 @@ Processa pagamentos e persiste os pedidos.
 ## Padrões de projeto utilizados
 
 - **Microsserviços** — cada serviço tem seu próprio banco e processo
+- **API Gateway** — ponto de entrada único com logging e rastreamento por request ID
 - **Event-driven** — Redis Streams para atualização assíncrona de estoque
 - **Consistência eventual** — o estoque é atualizado após a confirmação do pagamento via evento
 - **TTL automático** — carrinhos abandonados expiram em 24h sem necessidade de cron job
