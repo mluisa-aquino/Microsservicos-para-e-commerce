@@ -18,23 +18,26 @@ const API = {
     catalog: 'http://localhost:8001',
     cart:    'http://localhost:8002',
     payment: 'http://localhost:8003',
+    auth:    'http://localhost:8004',
 };
 
-/**
- * Identificador único do usuário, gerado uma única vez e persistido no
- * localStorage do browser. Substitui autenticação para fins de demonstração.
- */
-const USER_ID = localStorage.getItem('user_id') || (() => {
-    const id = 'user_' + Date.now().toString(36);
-    localStorage.setItem('user_id', id);
-    return id;
-})();
+// Sessão do usuário: token JWT e dados de perfil, persistidos no localStorage
+// para sobreviver a um refresh da página. O user_id usado pelo cart-service
+// e payment-service é o 'sub' do próprio token (currentUser.id).
+let authToken   = localStorage.getItem('auth_token') || null;
+let currentUser = JSON.parse(localStorage.getItem('auth_user') || 'null');
+
+/** Monta os headers de autenticação a partir do token atual, se houver. */
+function authHeaders(extra = {}) {
+    return authToken ? { ...extra, 'Authorization': `Bearer ${authToken}` } : extra;
+}
 
 // Estado global da aplicação
 let products         = [];   // lista completa de produtos carregados do catalog-service
 let cart             = { items: [], total: 0 };  // estado atual do carrinho
 let selectedCategory = 'Todos';  // categoria selecionada nos filtros
 let paymentMethod    = null;     // método de pagamento selecionado no modal
+let checkoutKey      = null;     // chave de idempotência gerada por checkout (evita cobrança dupla)
 
 /** Mapeamento de categoria para emoji (imagem dos cards) */
 const ICONS  = { 'Informática': '💻', 'Periféricos': '🖱️', 'Monitores': '🖥️', 'Áudio': '🎧' };
@@ -47,6 +50,7 @@ const COLORS = { 'Informática': '#4361ee', 'Periféricos': '#e63946', 'Monitore
 
 /** Inicializa a aplicação assim que o DOM estiver pronto */
 window.addEventListener('DOMContentLoaded', async () => {
+    renderAuthArea();
     // Carrega produtos e carrinho em paralelo para reduzir tempo de inicialização
     await Promise.all([loadProducts(), loadCart()]);
     checkServices();
@@ -167,23 +171,27 @@ function renderProducts(list) {
 
 // ── Cart ──────────────────────────────────────────────────────────────────────
 
-/** Carrega o estado atual do carrinho do cart-service */
+/** Carrega o estado atual do carrinho do cart-service (requer login) */
 async function loadCart() {
+    if (!authToken) { cart = { items: [], total: 0 }; syncBadge(); return; }
     try {
-        const res = await fetch(`${API.cart}/cart/${USER_ID}`);
-        cart      = await res.json();
+        const res = await fetch(`${API.cart}/cart/${currentUser.id}`, { headers: authHeaders() });
+        if (res.status === 401) { logout(); return; }
+        cart = await res.json();
         syncBadge();
     } catch { /* carrinho offline: ignora silenciosamente */ }
 }
 
-/** Envia requisição para adicionar um produto ao carrinho */
+/** Envia requisição para adicionar um produto ao carrinho (requer login) */
 async function addItem(productId) {
+    if (!authToken) { toast('Faça login para adicionar itens ao carrinho', 'warning'); openAuth('login'); return; }
     try {
-        const res  = await fetch(`${API.cart}/cart/${USER_ID}/items`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ product_id: productId, quantity: 1 }),
+        const res  = await fetch(`${API.cart}/cart/${currentUser.id}/items`, {
+            method:  'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body:    JSON.stringify({ product_id: productId, quantity: 1 }),
         });
+        if (res.status === 401) { logout(); return; }
         const data = await res.json();
         if (!res.ok) { toast(data.detail, 'danger'); return; }
         cart = data;
@@ -197,7 +205,11 @@ async function addItem(productId) {
 /** Remove um produto do carrinho */
 async function removeItem(productId) {
     try {
-        const res  = await fetch(`${API.cart}/cart/${USER_ID}/items/${productId}`, { method: 'DELETE' });
+        const res  = await fetch(`${API.cart}/cart/${currentUser.id}/items/${productId}`, {
+            method:  'DELETE',
+            headers: authHeaders(),
+        });
+        if (res.status === 401) { logout(); return; }
         const data = await res.json();
         if (res.ok) { cart = data; syncBadge(); renderCart(); }
     } catch {
@@ -265,6 +277,7 @@ function getCategory(productId) {
 
 /** Abre o modal de checkout com o resumo do pedido */
 function openCheckout() {
+    checkoutKey = crypto.randomUUID();  // nova chave por tentativa de checkout
     bootstrap.Offcanvas.getInstance(document.getElementById('offcanvasCart'))?.hide();
 
     // Reseta seleção de método de pagamento
@@ -307,21 +320,40 @@ function selectMethod(method) {
     document.getElementById('btn-confirm-payment').disabled = false;
 }
 
-/** Envia o pedido para o cart-service processar e exibe o resultado */
+/**
+ * Envia o checkout de forma assíncrona via mensageria.
+ *
+ * Fluxo:
+ * 1. POST /checkout → cart-service publica no stream e retorna order_id imediatamente
+ * 2. Fecha o modal e exibe spinner de "Aguardando..."
+ * 3. Faz polling em GET /orders/{order_id} até o status sair de "processing"
+ * 4. Exibe resultado no modal de resultado
+ */
 async function confirmPayment() {
     const btn    = document.getElementById('btn-confirm-payment');
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Processando...';
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Aguardando...';
 
     try {
-        const res  = await fetch(`${API.cart}/cart/${USER_ID}/checkout`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ payment_method: paymentMethod }),
+        const res = await fetch(`${API.cart}/cart/${currentUser.id}/checkout`, {
+            method:  'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json', 'Idempotency-Key': checkoutKey }),
+            body:    JSON.stringify({ payment_method: paymentMethod }),
         });
-        const order = await res.json();
+        if (res.status === 401) { logout(); return; }
+        if (!res.ok) {
+            const err = await res.json();
+            toast(err.detail || 'Erro ao iniciar checkout', 'danger');
+            return;
+        }
+
+        const { order_id } = await res.json();
 
         bootstrap.Modal.getInstance(document.getElementById('modalPayment'))?.hide();
+        toast('Processando pagamento...', 'info');
+
+        // Polling até o payment-service processar e publicar o resultado
+        const order = await pollOrderStatus(order_id);
 
         if (order.status === 'approved') {
             cart = { items: [], total: 0 };
@@ -340,6 +372,31 @@ async function confirmPayment() {
     }
 }
 
+/**
+ * Faz polling em GET /orders/{orderId} até o status sair de "processing".
+ * Tenta até maxAttempts vezes com intervalo de intervalMs ms entre tentativas.
+ * Se o tempo esgotar, retorna um pedido com status 'pending' para o usuário
+ * verificar o histórico de pedidos.
+ */
+async function pollOrderStatus(orderId, maxAttempts = 15, intervalMs = 2000) {
+    for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        try {
+            const res = await fetch(`${API.cart}/orders/${orderId}`);
+            if (!res.ok) continue;
+            const order = await res.json();
+            if (order.status !== 'processing') return order;
+        } catch { /* rede instável — tenta de novo */ }
+    }
+    return {
+        order_id:   orderId,
+        status:     'pending',
+        message:    'Tempo de resposta excedido. Verifique seu histórico de pedidos.',
+        payment_id: null,
+        total:      0,
+    };
+}
+
 /** Exibe o modal com o resultado do pagamento */
 function showResult(order) {
     const cfg = {
@@ -353,16 +410,81 @@ function showResult(order) {
         <h6 class="mt-2 mb-1 ${cfg.color}">${cfg.title}</h6>
         <p class="text-muted small mb-1">${order.message}</p>
         <p class="fw-bold mb-1">${fmt(order.total)}</p>
-        <small class="text-muted">Pedido #${order.payment_id}</small>`;
+        <small class="text-muted">Pedido #${order.payment_id || order.order_id}</small>`;
 
     new bootstrap.Modal(document.getElementById('modalResult')).show();
 }
 
 
+// ── Orders ────────────────────────────────────────────────────────────────────
+
+/** Abre o painel de pedidos e carrega o histórico do usuário logado */
+function openOrders() {
+    new bootstrap.Offcanvas(document.getElementById('offcanvasOrders')).show();
+    loadOrders();
+}
+
+/** Busca o histórico de pagamentos do usuário no payment-service */
+async function loadOrders() {
+    const container = document.getElementById('orders-list');
+    container.innerHTML = '<div class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+    try {
+        const res = await fetch(`${API.payment}/payments/user/${currentUser.id}`, { headers: authHeaders() });
+        if (res.status === 401) { logout(); return; }
+        const data = await res.json();
+        renderOrders(data.payments || []);
+    } catch {
+        container.innerHTML = '<p class="text-danger small text-center py-4">Erro ao carregar pedidos.</p>';
+    }
+}
+
+/** Renderiza a lista de pedidos do usuário, do mais recente para o mais antigo */
+function renderOrders(orders) {
+    const container = document.getElementById('orders-list');
+
+    if (!orders.length) {
+        container.innerHTML = `
+            <div class="text-center text-muted py-5">
+                <i class="bi bi-receipt" style="font-size:2.5rem;opacity:.3"></i>
+                <p class="mt-2 small mb-0">Você ainda não tem pedidos.</p>
+            </div>`;
+        return;
+    }
+
+    const STATUS = {
+        approved: { label: 'Aprovado', badge: 'success' },
+        declined: { label: 'Recusado', badge: 'danger'  },
+        pending:  { label: 'Pendente', badge: 'warning' },
+    };
+
+    container.innerHTML = orders.map(order => {
+        const status = STATUS[order.status] || { label: order.status, badge: 'secondary' };
+        const date   = new Date(order.created_at).toLocaleString('pt-BR');
+
+        return `
+        <div class="border rounded p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-start mb-1">
+                <span class="fw-semibold" style="font-size:13px">Pedido #${order.payment_id}</span>
+                <span class="badge bg-${status.badge}">${status.label}</span>
+            </div>
+            <p class="text-muted mb-2" style="font-size:11px">${date} &middot; ${order.payment_method.toUpperCase()}</p>
+            <ul class="list-unstyled mb-2" style="font-size:12px">
+                ${order.items.map(i => `<li>${i.quantity}&times; ${i.name}</li>`).join('')}
+            </ul>
+            <p class="fw-bold mb-0 text-end" style="font-size:13px">${fmt(order.total)}</p>
+        </div>`;
+    }).join('');
+}
+
+
 // ── Admin ─────────────────────────────────────────────────────────────────────
 
-/** Abre o painel administrativo na aba de cadastro de produto */
+/** Abre o painel administrativo na aba de cadastro de produto (requer role admin) */
 function openAdmin() {
+    if (!currentUser || currentUser.role !== 'admin') {
+        toast('Acesso restrito a administradores', 'danger');
+        return;
+    }
     showAdminTab('add');
     new bootstrap.Offcanvas(document.getElementById('offcanvasAdmin')).show();
 }
@@ -385,8 +507,8 @@ async function adminAddProduct(e) {
 
     try {
         const res = await fetch(`${API.catalog}/products`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method:  'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
                 name:        document.getElementById('a-name').value.trim(),
                 price:       parseFloat(document.getElementById('a-price').value),
@@ -395,6 +517,7 @@ async function adminAddProduct(e) {
                 description: document.getElementById('a-description').value.trim(),
             }),
         });
+        if (res.status === 401) { logout(); return; }
         const data = await res.json();
         if (!res.ok) { toast(data.detail || 'Erro ao adicionar', 'danger'); return; }
         toast(`"${data.name}" adicionado com sucesso!`, 'success');
@@ -449,16 +572,136 @@ async function adminUpdateStock(productId) {
 
     try {
         const res = await fetch(`${API.catalog}/products/${productId}/stock`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            method:  'PUT',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ stock: newStock }),
         });
+        if (res.status === 401) { logout(); return; }
         const data = await res.json();
         if (!res.ok) { toast(data.detail || 'Erro ao atualizar', 'danger'); return; }
         toast(`${data.name}: estoque atualizado para ${data.stock} un.`, 'success');
         await loadProducts();  // reflete a mudança no grid
     } catch {
         toast('Erro ao conectar ao catálogo', 'danger');
+    }
+}
+
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+/** Atualiza o botão/área de sessão na navbar (login ou perfil + sair) */
+function renderAuthArea() {
+    const el = document.getElementById('auth-area');
+    if (currentUser) {
+        el.innerHTML = `
+            <div class="dropdown">
+                <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+                    <i class="bi bi-person-fill me-1"></i>${currentUser.email.split('@')[0]}
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                    <li><span class="dropdown-item-text small text-muted">${currentUser.role === 'admin' ? 'Administrador' : 'Cliente'}</span></li>
+                    <li><hr class="dropdown-divider"></li>
+                    <li><button class="dropdown-item" onclick="openOrders()"><i class="bi bi-receipt me-2"></i>Meus Pedidos</button></li>
+                    <li><hr class="dropdown-divider"></li>
+                    <li><button class="dropdown-item" onclick="logout()">Sair</button></li>
+                </ul>
+            </div>`;
+    } else {
+        el.innerHTML = `<button class="btn btn-outline-light btn-sm" onclick="openAuth('login')">Entrar</button>`;
+    }
+}
+
+/** Abre o modal de autenticação na aba indicada ('login' ou 'register') */
+function openAuth(tab) {
+    showAuthTab(tab);
+    new bootstrap.Modal(document.getElementById('modalAuth')).show();
+}
+
+/** Alterna entre as abas de login e registro do modal de autenticação */
+function showAuthTab(tab) {
+    document.getElementById('auth-form-login').classList.toggle('d-none', tab !== 'login');
+    document.getElementById('auth-form-register').classList.toggle('d-none', tab !== 'register');
+    document.getElementById('auth-tab-login').classList.toggle('active', tab === 'login');
+    document.getElementById('auth-tab-register').classList.toggle('active', tab === 'register');
+}
+
+/** Persiste o token e os dados do usuário autenticado */
+function setSession(token, user) {
+    authToken   = token;
+    currentUser = user;
+    localStorage.setItem('auth_token', token);
+    localStorage.setItem('auth_user', JSON.stringify(user));
+    renderAuthArea();
+}
+
+/** Encerra a sessão atual e limpa o carrinho exibido */
+function logout() {
+    authToken   = null;
+    currentUser = null;
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_user');
+    cart = { items: [], total: 0 };
+    syncBadge();
+    renderAuthArea();
+}
+
+/** Autentica no auth-service e inicia a sessão */
+async function doLogin(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btn-login');
+    btn.disabled = true;
+    try {
+        const res = await fetch(`${API.auth}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                email:    document.getElementById('login-email').value.trim(),
+                password: document.getElementById('login-password').value,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) { toast(data.detail || 'Falha no login', 'danger'); return; }
+        setSession(data.access_token, data.user);
+        bootstrap.Modal.getInstance(document.getElementById('modalAuth'))?.hide();
+        e.target.reset();
+        toast(`Bem-vindo, ${data.user.email}!`, 'success');
+        await loadCart();
+    } catch {
+        toast('Erro ao conectar ao serviço de autenticação', 'danger');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+/** Cria uma nova conta no auth-service e já inicia a sessão */
+async function doRegister(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btn-register');
+    btn.disabled = true;
+    try {
+        const res = await fetch(`${API.auth}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                email:    document.getElementById('register-email').value.trim(),
+                password: document.getElementById('register-password').value,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            const msg = Array.isArray(data.detail) ? data.detail[0].msg : data.detail;
+            toast(msg || 'Falha ao criar conta', 'danger');
+            return;
+        }
+        setSession(data.access_token, data.user);
+        bootstrap.Modal.getInstance(document.getElementById('modalAuth'))?.hide();
+        e.target.reset();
+        toast('Conta criada com sucesso!', 'success');
+        await loadCart();
+    } catch {
+        toast('Erro ao conectar ao serviço de autenticação', 'danger');
+    } finally {
+        btn.disabled = false;
     }
 }
 

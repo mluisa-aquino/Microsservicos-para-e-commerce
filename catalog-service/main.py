@@ -5,6 +5,7 @@ Responsável por gerenciar o catálogo de produtos da plataforma.
 
 Funcionalidades:
 - CRUD de produtos com persistência em PostgreSQL
+- Autenticação via JWT — operações de escrita exigem role 'admin'
 - Controle de estoque em tempo real
 - Consumo de eventos do Redis Stream para decrementar estoque
   após aprovação de pagamento (arquitetura event-driven)
@@ -14,13 +15,15 @@ Porta padrão: 8001
 
 import os
 import json
+import socket
 import time
 import threading
 from contextlib import asynccontextmanager
 
+import jwt
 import psycopg
 import redis
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -34,12 +37,19 @@ DB_USER   = os.getenv("DB_USER",    "postgres")
 DB_PASS   = os.getenv("DB_PASS",    "postgres")
 REDIS_URL = os.getenv("REDIS_URL",  "redis://localhost:6379")
 
+# Mesma chave usada pelo auth-service para assinar os JWTs. A validação aqui
+# é local (sem chamar o auth-service): cada serviço verifica a assinatura
+# de forma independente, evitando um ponto único de falha na autenticação.
+JWT_SECRET    = os.getenv("JWT_SECRET", "shopmicro-dev-secret-change-me")
+JWT_ALGORITHM = "HS256"
+
 # Identificadores do Consumer Group no Redis Stream
 # O Consumer Group garante que cada mensagem seja processada uma única vez,
 # mesmo que múltiplas instâncias deste serviço estejam rodando
 STREAM_NAME    = "payments"
 CONSUMER_GROUP = "catalog-group"
-CONSUMER_NAME  = "catalog-consumer"
+# Hostname único por container — permite escalar sem conflito no Consumer Group
+CONSUMER_NAME  = f"catalog-consumer-{socket.gethostname()}"
 
 
 def get_db():
@@ -156,6 +166,28 @@ app = FastAPI(title="Catalog Service", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+# ── Autenticação ──────────────────────────────────────────────────────────────
+
+def get_current_user(authorization: str = Header(None)) -> dict:
+    """Dependency que extrai e valida o JWT do header Authorization: Bearer <token>."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    """Dependency que, além de autenticar, exige role 'admin' (cadastro/estoque)."""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return user
+
+
 # ── Modelos de entrada ────────────────────────────────────────────────────────
 
 class ProductCreate(BaseModel):
@@ -218,9 +250,9 @@ def get_product(product_id: int):
 
 
 @app.post("/products", status_code=201)
-def create_product(product: ProductCreate):
+def create_product(product: ProductCreate, _: dict = Depends(require_admin)):
     """
-    Cadastra um novo produto no catálogo.
+    Cadastra um novo produto no catálogo. Requer role 'admin'.
     Retorna o produto criado com o ID gerado pelo banco.
     """
     with get_db() as conn:
@@ -233,9 +265,9 @@ def create_product(product: ProductCreate):
 
 
 @app.put("/products/{product_id}/stock")
-def update_stock(product_id: int, body: StockUpdate):
+def update_stock(product_id: int, body: StockUpdate, _: dict = Depends(require_admin)):
     """
-    Atualiza manualmente o estoque de um produto.
+    Atualiza manualmente o estoque de um produto. Requer role 'admin'.
     Usado pelo painel administrativo do frontend.
     """
     if body.stock < 0:

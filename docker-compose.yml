@@ -1,5 +1,9 @@
 version: '3.8'
 
+# Chave compartilhada para assinar/verificar os JWTs em todos os serviços.
+# Em produção, isso viria de um secret manager — aqui é só uma env var.
+x-jwt-secret: &jwt-secret shopmicro-dev-secret-change-me
+
 services:
 
   # ── Infrastructure ────────────────────────────────────────────────────────────
@@ -36,6 +40,22 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-auth:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB:       auth
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5436:5432"
+    volumes:
+      - pgdata-auth:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     ports:
@@ -46,64 +66,174 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Load Balancer ─────────────────────────────────────────────────────────────
+  #
+  # Traefik atua como proxy reverso e balanceador de carga para os serviços de
+  # aplicação. Ele descobre automaticamente as instâncias via Docker e distribui
+  # as requisições entre elas, excluindo instâncias que falharem no health check.
+  #
+  # Portas externas (host → Traefik):
+  #   8001 → catalog-service  (N réplicas)
+  #   8002 → cart-service     (N réplicas)
+  #   8003 → payment-service  (N réplicas)
+  #   9090 → dashboard de monitoramento
+  #
+  # Para escalar um serviço:
+  #   docker compose up --scale catalog-service=3 --scale cart-service=2
+
+  traefik:
+    image: traefik:v3.0
+    command:
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.catalog.address=:8001
+      - --entrypoints.carrinho.address=:8002
+      - --entrypoints.pagamento.address=:8003
+    ports:
+      - "8001:8001"   # load balancer → catalog-service replicas
+      - "8002:8002"   # load balancer → cart-service replicas
+      - "8003:8003"   # load balancer → payment-service replicas
+      - "9090:8080"   # Traefik dashboard (acesse em localhost:9090)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
   # ── Application Services ──────────────────────────────────────────────────────
+
+  auth-service:
+    build: ./auth-service
+    ports:
+      - "8004:8004"
+    environment:
+      PORT:       8004
+      DB_HOST:    postgres-auth
+      DB_PORT:    5432
+      DB_NAME:    auth
+      DB_USER:    postgres
+      DB_PASS:    postgres
+      JWT_SECRET: *jwt-secret
+    depends_on:
+      postgres-auth:
+        condition: service_healthy
+    restart: unless-stopped
 
   catalog-service:
     build: ./catalog-service
-    ports:
-      - "8001:8001"
+    # Sem ports: o Traefik expõe a porta 8001 externamente e roteia para todas
+    # as réplicas. Adicione --scale catalog-service=N para criar N réplicas.
     environment:
-      PORT:      8001
-      DB_HOST:   postgres-catalog
-      DB_PORT:   5432
-      DB_NAME:   catalog
-      DB_USER:   postgres
-      DB_PASS:   postgres
-      REDIS_URL: redis://redis:6379
+      PORT:       8001
+      DB_HOST:    postgres-catalog
+      DB_PORT:    5432
+      DB_NAME:    catalog
+      DB_USER:    postgres
+      DB_PASS:    postgres
+      REDIS_URL:  redis://redis:6379
+      JWT_SECRET: *jwt-secret
     depends_on:
       postgres-catalog:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.catalog.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.catalog.entrypoints=catalog"
+      - "traefik.http.services.catalog.loadbalancer.server.port=8001"
+      - "traefik.http.services.catalog.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.catalog.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.catalog.loadbalancer.healthcheck.timeout=3s"
 
   cart-service:
     build: ./cart-service
-    ports:
-      - "8002:8002"
+    # Sem ports: o Traefik expõe a porta 8002 externamente.
     environment:
       PORT:        8002
       CATALOG_URL: http://catalog-service:8001
       PAYMENT_URL: http://payment-service:8003
       REDIS_URL:   redis://redis:6379
+      JWT_SECRET:  *jwt-secret
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.carrinho.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.carrinho.entrypoints=carrinho"
+      - "traefik.http.services.carrinho.loadbalancer.server.port=8002"
+      - "traefik.http.services.carrinho.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.carrinho.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.carrinho.loadbalancer.healthcheck.timeout=3s"
 
   payment-service:
     build: ./payment-service
-    ports:
-      - "8003:8003"
+    # Sem ports: o Traefik expõe a porta 8003 externamente.
     environment:
-      PORT:      8003
-      DB_HOST:   postgres-payment
-      DB_PORT:   5432
-      DB_NAME:   payment
-      DB_USER:   postgres
-      DB_PASS:   postgres
-      REDIS_URL: redis://redis:6379
+      PORT:       8003
+      DB_HOST:    postgres-payment
+      DB_PORT:    5432
+      DB_NAME:    payment
+      DB_USER:    postgres
+      DB_PASS:    postgres
+      REDIS_URL:  redis://redis:6379
+      JWT_SECRET: *jwt-secret
     depends_on:
       postgres-payment:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pagamento.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.pagamento.entrypoints=pagamento"
+      - "traefik.http.services.pagamento.loadbalancer.server.port=8003"
+      - "traefik.http.services.pagamento.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.pagamento.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.pagamento.loadbalancer.healthcheck.timeout=3s"
+
+  gateway-service:
+    build: ./gateway-service
+    ports:
+      - "8000:8000"
+    environment:
+      CATALOGO_URL:  http://catalog-service:8001
+      CARRINHO_URL:  http://cart-service:8002
+      PAGAMENTO_URL: http://payment-service:8003
+      AUTH_URL:      http://auth-service:8004
+      JWT_SECRET:    *jwt-secret
+    depends_on:
+      - catalog-service
+      - cart-service
+      - payment-service
+      - auth-service
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
     ports:
-      - "3000:80"
+      - "4000:80"
     volumes:
       - ./frontend/index.html:/usr/share/nginx/html/index.html
       - ./frontend/app.js:/usr/share/nginx/html/app.js
@@ -111,7 +241,9 @@ services:
       - catalog-service
       - cart-service
       - payment-service
+      - gateway-service
 
 volumes:
   pgdata-catalog:
   pgdata-payment:
+  pgdata-auth:

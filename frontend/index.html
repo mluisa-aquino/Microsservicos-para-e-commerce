@@ -58,6 +58,7 @@
 
         <div class="d-flex align-items-center gap-2 flex-shrink-0">
             <span id="service-status"></span>
+            <span id="auth-area"></span>
             <button class="btn btn-outline-secondary btn-sm" onclick="openAdmin()" title="Painel Admin">
                 <i class="bi bi-gear"></i>
             </button>
@@ -114,6 +115,18 @@
 </div>
 
 
+<!-- Offcanvas: Orders -->
+<div class="offcanvas offcanvas-end" id="offcanvasOrders" tabindex="-1">
+    <div class="offcanvas-header border-bottom">
+        <h6 class="offcanvas-title fw-bold"><i class="bi bi-receipt me-2"></i>Meus Pedidos</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas"></button>
+    </div>
+    <div class="offcanvas-body p-3" style="overflow-y:auto">
+        <div id="orders-list"></div>
+    </div>
+</div>
+
+
 <!-- Modal: Payment -->
 <div class="modal fade" id="modalPayment" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
@@ -157,6 +170,54 @@
             <button class="btn btn-dark btn-sm mt-3" data-bs-dismiss="modal">
                 Continuar comprando
             </button>
+        </div>
+    </div>
+</div>
+
+
+<!-- Modal: Auth -->
+<div class="modal fade" id="modalAuth" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h6 class="modal-title fw-bold"><i class="bi bi-person-circle me-2"></i>Minha conta</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="nav nav-tabs mb-3">
+                    <li class="nav-item">
+                        <button class="nav-link active" id="auth-tab-login" onclick="showAuthTab('login')">Entrar</button>
+                    </li>
+                    <li class="nav-item">
+                        <button class="nav-link" id="auth-tab-register" onclick="showAuthTab('register')">Criar conta</button>
+                    </li>
+                </ul>
+
+                <form id="auth-form-login" onsubmit="doLogin(event)">
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">E-mail</label>
+                        <input type="email" class="form-control form-control-sm" id="login-email" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Senha</label>
+                        <input type="password" class="form-control form-control-sm" id="login-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-dark btn-sm w-100" id="btn-login">Entrar</button>
+                </form>
+
+                <form id="auth-form-register" class="d-none" onsubmit="doRegister(event)">
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">E-mail</label>
+                        <input type="email" class="form-control form-control-sm" id="register-email" required>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold">Senha</label>
+                        <input type="password" class="form-control form-control-sm" id="register-password" minlength="8" required>
+                        <div class="form-text" style="font-size:11px">Mínimo de 8 caracteres, com letras e números.</div>
+                    </div>
+                    <button type="submit" class="btn btn-dark btn-sm w-100" id="btn-register">Criar conta</button>
+                </form>
+            </div>
         </div>
     </div>
 </div>
