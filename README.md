@@ -1,42 +1,54 @@
-# E-Commerce Microservices
+# E-Commerce Microsserviços
 
 Plataforma de e-commerce construída com arquitetura de microsserviços usando **FastAPI**, **PostgreSQL**, **Redis** e **Vanilla JS**.
 
 ## Arquitetura
 
 ```
-Frontend (porta 3000)
+Frontend nginx (porta 4000)
     │
-    ├── gateway-service  (porta 8000)  → Proxy reverso + logging de requests
-    ├── catalog-service  (porta 8001)  → PostgreSQL + Redis Consumer
-    ├── cart-service     (porta 8002)  → Redis (armazenamento do carrinho)
-    └── payment-service  (porta 8003)  → PostgreSQL + Redis Stream Publisher
+    ├── auth-service     (porta 8004)  → PostgreSQL — cadastro e login
+    ├── gateway-service  (porta 8000)  → Proxy reverso + validação JWT + logging
+    │
+    └── Traefik (load balancer)
+            ├── catalog-service  (porta 8001)  → PostgreSQL + Redis Consumer
+            ├── cart-service     (porta 8002)  → Redis (carrinho + checkout async)
+            └── payment-service  (porta 8003)  → PostgreSQL + Redis Stream Publisher
 ```
 
-### Fluxo de dados
+### Fluxo do checkout (assíncrono)
 
 ```
-Usuário clica "Ir para o pagamento"
-    → cart-service valida estoque no catalog-service
-    → cart-service chama payment-service
-    → payment-service persiste o pedido no PostgreSQL
-    → payment-service publica evento no Redis Stream ("payments")
-    → catalog-service consome o evento e decrementa o estoque (consistência eventual)
+Usuário clica "Finalizar compra"
+    → cart-service publica pedido no stream 'checkout'
+    → retorna order_id imediatamente (status: processing)
+    → frontend faz polling em GET /orders/{order_id}
+
+    (em paralelo, assincronamente)
+    → payment-service consome 'checkout', processa, persiste no PostgreSQL
+    → publica resultado em 'payment_results' → cart-service atualiza status
+    → publica 'payment_approved' em 'payments' → catalog-service decrementa estoque
 ```
+
+A validação de estoque antes de adicionar ao carrinho é **síncrona** (HTTP direto ao catalog-service); o checkout em si é **assíncrono** via Redis Streams.
 
 ## Estrutura de pastas
 
 ```
 ecommerce-microservices/
 ├── docker-compose.yml
-├── gateway-service/        # API Gateway com logging e proxy reverso
+├── gateway-service/        # API Gateway com proxy reverso, JWT e logging
 │   ├── main.py
 │   └── requirements.txt
-├── catalog-service/        # Gerenciamento do catálogo de produtos
+├── auth-service/           # Cadastro, login e emissão de tokens JWT
 │   ├── main.py
 │   ├── requirements.txt
 │   └── Dockerfile
-├── cart-service/           # Carrinho de compras (Redis)
+├── catalog-service/        # Catálogo de produtos e controle de estoque
+│   ├── main.py
+│   ├── requirements.txt
+│   └── Dockerfile
+├── cart-service/           # Carrinho (Redis) e orquestração do checkout
 │   ├── main.py
 │   ├── requirements.txt
 │   └── Dockerfile
@@ -47,6 +59,7 @@ ecommerce-microservices/
 └── frontend/               # SPA em Vanilla JS + Bootstrap 5
     ├── index.html
     ├── app.js
+    ├── images/
     └── Dockerfile
 ```
 
@@ -62,20 +75,22 @@ ecommerce-microservices/
 docker compose up --build
 ```
 
-> Na primeira execução, o Docker irá baixar as imagens base e instalar as dependências (~2–3 min). Nas próximas execuções será muito mais rápido.
+> Na primeira execução o Docker baixa as imagens base e instala dependências (~2–3 min). Nas próximas execuções será muito mais rápido.
 
 ### Acessar o site
 
-**http://localhost:3000**
+**http://localhost:4000**
 
 ### Outros endpoints disponíveis
 
 | Serviço | URL | Documentação interativa |
 |---|---|---|
 | Gateway | http://localhost:8000 | http://localhost:8000/docs |
+| Auth | http://localhost:8004 | http://localhost:8004/docs |
 | Catálogo | http://localhost:8001 | http://localhost:8001/docs |
 | Carrinho | http://localhost:8002 | http://localhost:8002/docs |
 | Pagamento | http://localhost:8003 | http://localhost:8003/docs |
+| Traefik dashboard | http://localhost:9090 | — |
 
 ### Parar os serviços
 
@@ -83,11 +98,19 @@ docker compose up --build
 docker compose down
 ```
 
-Para parar **e apagar os dados** (banco de dados zerado):
+Para parar **e apagar os dados** (bancos zerados):
 
 ```bash
 docker compose down -v
 ```
+
+### Escalar um serviço
+
+```bash
+docker compose up --scale catalog-service=3 --scale cart-service=2
+```
+
+O Traefik detecta automaticamente as novas réplicas e distribui as requisições entre elas.
 
 ---
 
@@ -95,103 +118,112 @@ docker compose down -v
 
 **Pré-requisitos:** Python 3.11+, PostgreSQL 15, Redis 7.
 
-### 1. Iniciar infraestrutura (só os bancos)
+### 1. Iniciar infraestrutura
 
 ```bash
-docker compose up postgres-catalog postgres-payment redis
+docker compose up postgres-catalog postgres-payment postgres-auth redis
 ```
 
-### 2. Instalar dependências e subir cada serviço em terminais separados
+### 2. Subir cada serviço em terminais separados
 
 ```bash
-# Terminal 1 — Catálogo (porta 8001)
+# Terminal 1 — Auth (porta 8004)
+cd auth-service && pip install -r requirements.txt && uvicorn main:app --port 8004 --reload
+
+# Terminal 2 — Catálogo (porta 8001)
 cd catalog-service && pip install -r requirements.txt && uvicorn main:app --port 8001 --reload
 
-# Terminal 2 — Carrinho (porta 8002)
+# Terminal 3 — Carrinho (porta 8002)
 cd cart-service && pip install -r requirements.txt && uvicorn main:app --port 8002 --reload
 
-# Terminal 3 — Pagamento (porta 8003)
+# Terminal 4 — Pagamento (porta 8003)
 cd payment-service && pip install -r requirements.txt && uvicorn main:app --port 8003 --reload
 
-# Terminal 4 — API Gateway (porta 8000)
+# Terminal 5 — Gateway (porta 8000)
 cd gateway-service && pip install -r requirements.txt && uvicorn main:app --port 8000 --reload
 
-# Terminal 5 — Frontend
-cd frontend && python -m http.server 3000
+# Terminal 6 — Frontend
+cd frontend && python -m http.server 4000
 ```
 
-Acesse **http://localhost:3000**.
+Acesse **http://localhost:4000**.
 
 ---
 
 ## Serviços
 
+### auth-service (porta 8004)
+
+Cadastro, login e emissão de tokens JWT (HS256, expiração em 24h).
+O token é verificado localmente por cada microsserviço — sem chamada de rede ao auth-service na hora de validar.
+
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| POST | `/auth/register` | — | Cria conta de usuário |
+| POST | `/auth/login` | — | Autentica e retorna JWT |
+| GET | `/auth/me` | JWT | Dados do usuário autenticado |
+| GET | `/health` | — | Health check |
+
 ### gateway-service (porta 8000)
 
-API Gateway com proxy reverso e logging centralizado de requests.
-
-- Adiciona `X-Request-ID` em cada requisição para rastreamento
-- Roteia `/produtos`, `/carrinho` e `/pagamento` para os serviços correspondentes
-
-**Endpoints:**
+Ponto de entrada único. Valida o JWT antes de rotear (1ª camada), propaga `X-Request-ID` para rastreamento nos logs e faz proxy reverso para os serviços internos.
 
 | Método | Rota | Descrição |
 |---|---|---|
 | GET | `/health` | Health check do gateway |
-| GET | `/services/health` | Health check de todos os serviços |
+| GET | `/services/health` | Health check de todos os serviços em paralelo |
 
 ### catalog-service (porta 8001)
 
-Gerencia o catálogo de produtos com controle de estoque.
+Gerencia o catálogo de produtos. Operações de escrita exigem role `admin`.
+Banco: PostgreSQL (porta 5434). Consome o stream `payments` para decrementar estoque após pagamento aprovado.
 
-- Banco: PostgreSQL (porta 5434)
-- Consome eventos do Redis Stream `payments` para decrementar estoque após aprovação de pagamento
-
-**Endpoints:**
-
-| Método | Rota | Descrição |
-|---|---|---|
-| GET | `/products` | Lista produtos (paginação + filtro por categoria) |
-| GET | `/products/{id}` | Detalhes de um produto |
-| POST | `/products` | Cria produto |
-| PUT | `/products/{id}/stock` | Atualiza estoque |
-| GET | `/health` | Health check |
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| GET | `/products` | — | Lista produtos (paginação + filtro por categoria) |
+| GET | `/products/{id}` | — | Detalhes de um produto |
+| POST | `/products` | admin | Cadastra produto |
+| PUT | `/products/{id}/stock` | admin | Atualiza estoque |
+| GET | `/health` | — | Health check |
 
 ### cart-service (porta 8002)
 
-Gerencia o carrinho de compras e orquestra o checkout.
+Armazena o carrinho no Redis (TTL 24h) e orquestra o checkout de forma assíncrona via Redis Streams. Suporta chave de idempotência (`Idempotency-Key`) para evitar pedidos duplicados em retries.
 
-- Armazenamento: Redis (TTL de 24h — carrinhos abandonados expiram automaticamente)
-- Valida estoque no catalog-service antes de adicionar item
-- Chama o payment-service no checkout
-
-**Endpoints:**
-
-| Método | Rota | Descrição |
-|---|---|---|
-| GET | `/cart/{user_id}` | Retorna o carrinho do usuário |
-| POST | `/cart/{user_id}/items` | Adiciona item ao carrinho |
-| DELETE | `/cart/{user_id}/items/{product_id}` | Remove item |
-| POST | `/cart/{user_id}/checkout` | Finaliza compra |
-| GET | `/health` | Health check |
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| GET | `/cart/{user_id}` | JWT | Retorna o carrinho |
+| POST | `/cart/{user_id}/items` | JWT | Adiciona item (valida estoque no catalog-service) |
+| DELETE | `/cart/{user_id}/items/{product_id}` | JWT | Remove item |
+| POST | `/cart/{user_id}/checkout` | JWT | Inicia checkout assíncrono |
+| GET | `/orders/{order_id}` | — | Consulta status do pedido (usado para polling) |
+| GET | `/health` | — | Health check |
 
 ### payment-service (porta 8003)
 
-Processa pagamentos e persiste os pedidos.
+Processa pagamentos consumindo o stream `checkout`, persiste no PostgreSQL e publica resultados.
+Banco: PostgreSQL (porta 5435). Métodos aceitos: `pix`, `card`, `boleto`.
+Aprovação simulada: 90% para PIX e cartão; boleto sempre retorna `pending`.
+Desconto de 5% aplicado automaticamente para pagamentos via PIX.
 
-- Banco: PostgreSQL (porta 5435)
-- Métodos aceitos: `pix`, `card`, `boleto`
-- Simula aprovação com 90% de taxa de sucesso (PIX/Cartão); boleto sempre gera status `pending`
-- Publica evento `payment_approved` no Redis Stream após aprovação
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| POST | `/payments` | JWT | Processa pagamento (endpoint HTTP direto) |
+| GET | `/payments/{payment_id}` | JWT | Detalhes do pagamento |
+| GET | `/payments/user/{user_id}` | JWT | Histórico do usuário |
+| GET | `/health` | — | Health check |
 
-**Endpoints:**
+---
 
-| Método | Rota | Descrição |
-|---|---|---|
-| POST | `/payments` | Processa pagamento |
-| GET | `/payments/{payment_id}` | Detalhes do pagamento |
-| GET | `/payments/user/{user_id}` | Histórico do usuário |
-| GET | `/health` | Health check |
+## Redis Streams
+
+| Stream | Publicador | Consumidor | Evento |
+|---|---|---|---|
+| `checkout` | cart-service | payment-service | Pedido solicitado |
+| `payment_results` | payment-service | cart-service | Resultado do pagamento |
+| `payments` | payment-service | catalog-service | Pagamento aprovado (decrementa estoque) |
+
+Consumer Groups garantem que cada mensagem seja processada uma única vez mesmo com múltiplas réplicas rodando. XACK confirma o processamento; mensagens não confirmadas são reenviadas automaticamente em caso de falha.
 
 ---
 
@@ -201,15 +233,19 @@ Processa pagamentos e persiste os pedidos.
 |---|---|
 | Backend | FastAPI (Python 3.12) |
 | Banco relacional | PostgreSQL 15 |
-| Cache / filas | Redis 7 (Redis Streams) |
+| Cache / mensageria | Redis 7 (Redis Streams) |
 | Frontend | Vanilla JS + Bootstrap 5.3 |
 | Containerização | Docker + Docker Compose |
+| Load balancer | Traefik v3 |
 | Servidor HTTP | Uvicorn (APIs) / Nginx (frontend) |
 
-## Padrões de projeto utilizados
+## Padrões utilizados
 
-- **Microsserviços** — cada serviço tem seu próprio banco e processo
-- **API Gateway** — ponto de entrada único com logging e rastreamento por request ID
-- **Event-driven** — Redis Streams para atualização assíncrona de estoque
-- **Consistência eventual** — o estoque é atualizado após a confirmação do pagamento via evento
+- **Microsserviços** — cada serviço tem seu próprio banco e ciclo de deploy independente
+- **API Gateway** — ponto de entrada único com JWT, logging e rastreamento por X-Request-ID
+- **Event-driven** — checkout assíncrono via Redis Streams desacopla cart, payment e catalog
+- **Consistência eventual** — estoque decrementado após confirmação de pagamento via evento
+- **Consumer Group** — múltiplas réplicas compartilham o stream sem processar a mesma mensagem duas vezes
+- **Idempotência** — chave por checkout evita cobrança duplicada em retries de rede
+- **JWT stateless** — token verificado localmente em cada serviço, sem dependência do auth-service em tempo de requisição
 - **TTL automático** — carrinhos abandonados expiram em 24h sem necessidade de cron job
