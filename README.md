@@ -63,7 +63,7 @@ ecommerce-microservices/
     └── Dockerfile
 ```
 
-## Como rodar (Docker — recomendado)
+## Como rodar
 
 ### Pré-requisitos
 
@@ -114,7 +114,7 @@ O Traefik detecta automaticamente as novas réplicas e distribui as requisiçõe
 
 ---
 
-## Como rodar manualmente (sem Docker)
+## Como rodar manualmente
 
 **Pré-requisitos:** Python 3.11+, PostgreSQL 15, Redis 7.
 
