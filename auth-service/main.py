@@ -1,21 +1,10 @@
 """
-Auth Service
-------------
-Responsável por cadastro, login e emissão de tokens JWT para os
-usuários da plataforma.
+Auth Service — porta 8004
 
-Funcionalidades:
-- Registro de usuário com senha hasheada (bcrypt)
-- Login com emissão de JWT assinado (HS256)
-- Endpoint /auth/me para validar o token e devolver os dados do usuário
-
-O token emitido aqui é validado de forma independente por cada um dos
-outros serviços (catalog, cart, payment, gateway), todos compartilhando
-o mesmo JWT_SECRET. Não há chamada de rede entre os serviços para validar
-um token — a verificação é local (stateless), o que evita que o auth-service
-se torne um ponto único de falha para toda autenticação do sistema.
-
-Porta padrão: 8004
+Cadastro, login e emissão de tokens JWT (HS256).
+O token é verificado localmente por cada microsserviço usando a mesma
+JWT_SECRET — sem chamada de rede ao auth-service na hora de validar.
+Isso elimina dependência em tempo de requisição e evita ponto único de falha.
 """
 
 import os
@@ -49,7 +38,6 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
 
 def get_db():
-    """Abre e retorna uma conexão com o banco PostgreSQL."""
     return psycopg.connect(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
         user=DB_USER, password=DB_PASS,
@@ -58,11 +46,7 @@ def get_db():
 
 
 def init_db():
-    """
-    Cria a tabela de usuários se não existir e garante a existência de uma
-    conta admin padrão, para permitir testar os endpoints administrativos
-    do catalog-service sem precisar de um passo manual de promoção de role.
-    """
+    # Cria a tabela de usuários e garante uma conta admin padrão para testes
     with get_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -85,7 +69,6 @@ def init_db():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Inicializa o banco e a conta admin na subida do serviço."""
     init_db()
     yield
 
@@ -116,7 +99,6 @@ def _create_token(user_id: int, email: str, role: str) -> str:
 
 
 def get_current_user(authorization: str = Header(None)) -> dict:
-    """Dependency que extrai e valida o JWT do header Authorization: Bearer <token>."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.removeprefix("Bearer ").strip()
@@ -131,7 +113,6 @@ def get_current_user(authorization: str = Header(None)) -> dict:
 # ── Modelos de entrada ────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    """Dados para criação de uma nova conta."""
     email: EmailStr
     password: str
 
@@ -146,7 +127,6 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """Dados para autenticação."""
     email: EmailStr
     password: str
 
@@ -155,17 +135,12 @@ class LoginRequest(BaseModel):
 
 @app.get("/health")
 def health_check():
-    """Verifica se o serviço está operacional."""
     return {"status": "ok", "service": "auth-service"}
 
 
 @app.post("/auth/register", status_code=201)
 def register(req: RegisterRequest):
-    """
-    Cria uma nova conta de usuário com a senha já hasheada (bcrypt).
-    Novas contas sempre nascem com role 'user' — promoção a admin é
-    feita diretamente no banco, fora do alcance da API pública.
-    """
+    # Novas contas sempre têm role 'user'; promoção a admin é feita direto no banco
     with get_db() as conn:
         existing = conn.execute(
             "SELECT id FROM users WHERE email = %s", (req.email,)
@@ -185,7 +160,6 @@ def register(req: RegisterRequest):
 
 @app.post("/auth/login")
 def login(req: LoginRequest):
-    """Valida as credenciais e, se corretas, emite um novo JWT."""
     with get_db() as conn:
         row = conn.execute(
             "SELECT id, email, password_hash, role FROM users WHERE email = %s",
@@ -205,5 +179,4 @@ def login(req: LoginRequest):
 
 @app.get("/auth/me")
 def me(user: dict = Depends(get_current_user)):
-    """Retorna os dados do usuário autenticado a partir do token enviado."""
     return {"id": user["sub"], "email": user["email"], "role": user["role"]}

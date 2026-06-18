@@ -237,6 +237,7 @@ services:
     volumes:
       - ./frontend/index.html:/usr/share/nginx/html/index.html
       - ./frontend/app.js:/usr/share/nginx/html/app.js
+      - ./frontend/images:/usr/share/nginx/html/images
     depends_on:
       - catalog-service
       - cart-service

@@ -1,18 +1,12 @@
 """
-Cart Service
-------------
-Responsável por gerenciar o carrinho de compras dos usuários
-e orquestrar o checkout via mensageria assíncrona.
+Cart Service — porta 8002
 
-Funcionalidades:
-- Armazenamento do carrinho no Redis com TTL de 24 horas
-- Validação de estoque em tempo real via catalog-service (async)
-- Autenticação via JWT — cada endpoint exige token válido
-- Checkout assíncrono: publica em 'checkout', consome de 'payment_results'
-- Chave de idempotência: reutiliza order_id para evitar publicação duplicada
-- Consumer name dinâmico por hostname — seguro para escalar com --scale
+Gerencia o carrinho de compras no Redis (TTL 24h) e orquestra o checkout
+de forma assíncrona: publica no stream 'checkout' e consome de
+'payment_results' para atualizar o status do pedido.
 
-Porta padrão: 8002
+Chave de idempotência: requisições repetidas com o mesmo Idempotency-Key
+devolvem o pedido já existente, evitando cobranças duplicadas.
 """
 
 import os
@@ -55,7 +49,6 @@ _redis = redis.from_url(REDIS_URL, decode_responses=True)
 # ── Autenticação ──────────────────────────────────────────────────────────────
 
 def get_current_user(authorization: str = Header(None)) -> dict:
-    """Dependency que extrai e valida o JWT do header Authorization: Bearer <token>."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.removeprefix("Bearer ").strip()
@@ -68,10 +61,7 @@ def get_current_user(authorization: str = Header(None)) -> dict:
 
 
 def require_owner(user_id: str, user: dict = Depends(get_current_user)) -> dict:
-    """
-    Dependency que, além de autenticar, garante que o usuário só acesse o
-    próprio carrinho (o user_id da URL precisa bater com o 'sub' do token).
-    """
+    # Garante que o usuário só acesse o próprio carrinho; admin tem acesso irrestrito
     if user["sub"] != user_id and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="You can only access your own cart")
     return user
@@ -99,13 +89,9 @@ def save_cart(user_id: str, items: list):
 
 def payment_results_consumer():
     """
-    Worker em background que consome resultados de pagamento do Redis Stream.
-
-    Fluxo:
-    1. Aguarda eventos 'payment.processed' publicados pelo payment-service
-    2. Atualiza o status do pedido no Redis (order:{order_id})
-    3. Se aprovado, remove o carrinho do usuário (chave Redis)
-    4. Confirma processamento com XACK para evitar reentrega
+    Consome resultados de pagamento do stream 'payment_results'.
+    Atualiza o status do pedido no Redis e, se aprovado, limpa o carrinho.
+    XACK confirma o processamento para evitar reentrega pelo Consumer Group.
     """
     r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -149,7 +135,6 @@ def payment_results_consumer():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Inicia o consumer de resultados de pagamento em background."""
     threading.Thread(target=payment_results_consumer, daemon=True).start()
     yield
 
@@ -187,10 +172,7 @@ def get_cart(user_id: str, _: dict = Depends(require_owner)):
 
 @app.post("/cart/{user_id}/items")
 async def add_item(user_id: str, item: ItemRequest, _: dict = Depends(require_owner)):
-    """
-    Adiciona um item ao carrinho após validar disponibilidade no catalog-service.
-    Usa httpx.AsyncClient para não bloquear o event loop do Uvicorn.
-    """
+    # Consulta o catalog-service de forma assíncrona para não bloquear o event loop
     if item.quantity <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be greater than zero")
 
@@ -257,17 +239,11 @@ async def checkout(
     _: dict = Depends(require_owner),
 ):
     """
-    Inicia o checkout de forma assíncrona via Redis Streams.
+    Publica o pedido no stream 'checkout' e retorna imediatamente com status
+    'processing'. O cliente deve fazer polling em GET /orders/{order_id} até
+    o payment-service processar e publicar o resultado em 'payment_results'.
 
-    Fluxo:
-    1. Se Idempotency-Key já foi vista → devolve o pedido existente (sem republicar)
-    2. Gera um order_id (ou usa a própria chave de idempotência como order_id)
-    3. Salva o pedido com status 'processing' no Redis
-    4. Publica evento 'checkout.requested' no stream 'checkout'
-    5. Retorna imediatamente — o cliente faz polling em GET /orders/{order_id}
-
-    O payment-service consome o evento, processa e publica em 'payment_results'.
-    O consumer deste serviço atualiza o status do pedido no Redis.
+    Se Idempotency-Key já foi vista, devolve o pedido existente sem republicar.
     """
     idempotency_key = request.headers.get("idempotency-key")
 
@@ -279,9 +255,7 @@ async def checkout(
             if order["status"] != "processing":
                 resp.headers["X-Idempotent-Replayed"] = "true"
             return resp
-        # Usa a chave como order_id — garante que retries do cliente
-        # sempre apontem para o mesmo pedido no Redis
-        order_id = idempotency_key
+            order_id = idempotency_key
     else:
         order_id = str(uuid.uuid4())[:8].upper()
 
@@ -289,7 +263,9 @@ async def checkout(
     if not items:
         raise HTTPException(status_code=400, detail="Cart is empty")
 
-    total = round(sum(i["unit_price"] * i["quantity"] for i in items), 2)
+    subtotal    = round(sum(i["unit_price"] * i["quantity"] for i in items), 2)
+    pix_discount = round(subtotal * 0.05, 2) if req.payment_method == "pix" else 0
+    total        = round(subtotal - pix_discount, 2)
     order = {
         "order_id":   order_id,
         "user_id":    user_id,
@@ -314,10 +290,6 @@ async def checkout(
 
 @app.get("/orders/{order_id}")
 def get_order(order_id: str):
-    """
-    Retorna o status atual de um pedido. Usado pelo frontend para polling
-    após o checkout assíncrono.
-    """
     raw = _redis.get(f"order:{order_id}")
     if not raw:
         raise HTTPException(status_code=404, detail="Order not found")

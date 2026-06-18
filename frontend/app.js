@@ -1,16 +1,7 @@
 /**
- * app.js — Frontend da plataforma ShopMicro
- *
- * SPA (Single Page Application) em Vanilla JS que se comunica diretamente
- * com os microsserviços via fetch API.
- *
- * Módulos:
- *  - Boot: inicialização e verificação de serviços
- *  - Catalog: listagem, busca e filtro de produtos
- *  - Cart: carrinho de compras (adicionar, remover, exibir)
- *  - Checkout: resumo do pedido e seleção de forma de pagamento
- *  - Admin: painel administrativo (cadastrar produto, editar estoque)
- *  - Utils: formatação de moeda e toasts de notificação
+ * app.js — SPA em Vanilla JS que se comunica diretamente com os microsserviços.
+ * Cada seção (Boot, Catalog, Cart, Checkout, Admin, Auth) consome um serviço distinto,
+ * ilustrando o acoplamento fraco característico da arquitetura de microsserviços.
  */
 
 /** URLs base dos microsserviços */
@@ -21,42 +12,72 @@ const API = {
     auth:    'http://localhost:8004',
 };
 
-// Sessão do usuário: token JWT e dados de perfil, persistidos no localStorage
-// para sobreviver a um refresh da página. O user_id usado pelo cart-service
-// e payment-service é o 'sub' do próprio token (currentUser.id).
+// Token JWT e perfil persistidos no localStorage para sobreviver a refresh.
+// O user_id usado pelo cart-service e payment-service é o campo 'sub' do token.
 let authToken   = localStorage.getItem('auth_token') || null;
 let currentUser = JSON.parse(localStorage.getItem('auth_user') || 'null');
 
-/** Monta os headers de autenticação a partir do token atual, se houver. */
 function authHeaders(extra = {}) {
     return authToken ? { ...extra, 'Authorization': `Bearer ${authToken}` } : extra;
 }
 
-// Estado global da aplicação
-let products         = [];   // lista completa de produtos carregados do catalog-service
-let cart             = { items: [], total: 0 };  // estado atual do carrinho
-let selectedCategory = 'Todos';  // categoria selecionada nos filtros
-let paymentMethod    = null;     // método de pagamento selecionado no modal
-let checkoutKey      = null;     // chave de idempotência gerada por checkout (evita cobrança dupla)
+let products      = [];
+let cart          = { items: [], total: 0 };
+let paymentMethod = null;
+let checkoutKey   = null;  // chave de idempotência por tentativa de checkout
+let currentSort   = 'default';
+let detailQty     = 1;
 
-/** Mapeamento de categoria para emoji (imagem dos cards) */
-const ICONS  = { 'Informática': '💻', 'Periféricos': '🖱️', 'Monitores': '🖥️', 'Áudio': '🎧' };
+const ICONS = {
+    'Informática':   '💻',
+    'Periféricos':   '🖱️',
+    'Monitores':     '🖥️',
+    'Áudio':         '🎧',
+    'Celulares':     '📱',
+    'Games':         '🎮',
+    'Câmeras':       '📷',
+    'Armazenamento': '💾',
+};
 
-/** Mapeamento de categoria para cor do tema do card */
-const COLORS = { 'Informática': '#4361ee', 'Periféricos': '#e63946', 'Monitores': '#0096c7', 'Áudio': '#2dc653' };
+const COLORS = {
+    'Informática':   '#4361ee',
+    'Periféricos':   '#e63946',
+    'Monitores':     '#0096c7',
+    'Áudio':         '#2dc653',
+    'Celulares':     '#7c3aed',
+    'Games':         '#db2777',
+    'Câmeras':       '#0369a1',
+    'Armazenamento': '#047857',
+};
+
+// Converte nome do produto em slug para localizar o arquivo em /images/
+// Ex.: "Canon EOS R50 + 18-45mm" → "canon-eos-r50-18-45mm" → /images/canon-eos-r50-18-45mm.jpg
+function productSlug(name) {
+    const accents = {'á':'a','à':'a','â':'a','ã':'a','ä':'a','é':'e','è':'e','ê':'e','ë':'e',
+                     'í':'i','ì':'i','î':'i','ï':'i','ó':'o','ò':'o','ô':'o','õ':'o','ö':'o',
+                     'ú':'u','ù':'u','û':'u','ü':'u','ç':'c','ñ':'n'};
+    return name.toLowerCase()
+        .replace(/[áàâãäéèêëíìîïóòôõöúùûüçñ]/g, c => accents[c] || c)
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+}
+
+function renderStars(id) {
+    const n = [4, 5, 4, 5, 5, 4, 4, 5, 3, 4, 5, 4, 5, 5, 4, 4, 5, 4, 5, 5][id % 20];
+    const count = 20 + (id * 7) % 180;
+    return `<span style="color:#f59e0b;font-size:11px;letter-spacing:1px">${'★'.repeat(n)}${'☆'.repeat(5-n)}</span><span style="font-size:10px;color:#94a3b8;margin-left:3px">(${count})</span>`;
+}
 
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
-/** Inicializa a aplicação assim que o DOM estiver pronto */
 window.addEventListener('DOMContentLoaded', async () => {
     renderAuthArea();
-    // Carrega produtos e carrinho em paralelo para reduzir tempo de inicialização
+    // Promise.all carrega produtos e carrinho em paralelo, reduzindo o tempo de boot
     await Promise.all([loadProducts(), loadCart()]);
     checkServices();
 });
 
-/** Verifica se o catalog-service está acessível e atualiza o indicador na navbar */
 async function checkServices() {
     const el = document.getElementById('service-status');
     try {
@@ -70,30 +91,21 @@ async function checkServices() {
 
 // ── Catalog ───────────────────────────────────────────────────────────────────
 
-/** Busca produtos do catalog-service e atualiza a interface */
 async function loadProducts() {
     try {
         const res  = await fetch(`${API.catalog}/products?limit=50`);
         const data = await res.json();
-        products   = data.products;
+        products = data.products;
 
         document.getElementById('product-info').textContent =
-            `${data.total} produto${data.total !== 1 ? 's' : ''} encontrado${data.total !== 1 ? 's' : ''}`;
+            `${data.total} produto${data.total !== 1 ? 's' : ''}`;
 
-        // Gera os botões de filtro dinamicamente com base nas categorias existentes
-        const categories = ['Todos', ...new Set(products.map(p => p.category))];
-        document.getElementById('category-filters').innerHTML = categories.map(c => `
-            <button class="btn btn-sm rounded-pill ${c === selectedCategory ? 'btn-dark' : 'btn-outline-secondary'}"
-                    data-cat="${c}" onclick="setCategory('${c}')">${c}</button>
-        `).join('');
-
-        // Aplica os filtros atuais (categoria e busca) após recarregar produtos
+        renderCatNav();
         filterProducts();
     } catch {
-        document.getElementById('product-grid').innerHTML = `
+        document.getElementById('product-sections').innerHTML = `
             <div class="col-12">
                 <div class="alert alert-danger mb-0">
-                    <i class="bi bi-exclamation-triangle me-2"></i>
                     Não foi possível carregar os produtos. Verifique se os serviços estão rodando.
                 </div>
             </div>`;
@@ -101,77 +113,289 @@ async function loadProducts() {
     }
 }
 
-/** Atualiza a categoria selecionada e aplica os filtros */
-function setCategory(cat) {
-    selectedCategory = cat;
-    document.querySelectorAll('#category-filters button').forEach(btn => {
-        const active = btn.dataset.cat === cat;
-        btn.className = `btn btn-sm rounded-pill ${active ? 'btn-dark' : 'btn-outline-secondary'}`;
+function renderCatNav() {
+    const catOrder = [...new Set(products.map(p => p.category))];
+    const nav = document.getElementById('cat-nav');
+    if (!nav) return;
+    nav.innerHTML = `<div class="container"><div class="cat-nav-inner">
+        <a class="cat-link active" href="#" onclick="goHome();return false">Todos</a>
+        ${catOrder.map(cat =>
+            `<a class="cat-link" href="#cat-${productSlug(cat)}" onclick="setCatActive(this)">${cat}</a>`
+        ).join('')}
+    </div></div>`;
+}
+
+function setCatActive(el) {
+    document.querySelectorAll('.cat-link').forEach(l => l.classList.remove('active'));
+    el.classList.add('active');
+    if (!document.getElementById('product-detail-section').classList.contains('d-none')) {
+        closeProduct();
+    }
+}
+
+function applySort(val, label) {
+    currentSort = val;
+    const btn = document.getElementById('sort-label');
+    if (btn) btn.textContent = label;
+    document.querySelectorAll('.sort-item').forEach(el => {
+        el.classList.toggle('active', el.textContent.trim() === label);
     });
     filterProducts();
 }
 
-/**
- * Filtra os produtos pelo texto de busca e categoria selecionada.
- * A busca é feita localmente (sem nova requisição ao servidor)
- * sobre os dados já carregados em memória.
- */
+function goHome() {
+    if (!document.getElementById('product-detail-section').classList.contains('d-none')) {
+        closeProduct();
+    }
+    document.querySelectorAll('.cat-link').forEach(l => l.classList.remove('active'));
+    document.querySelector('.cat-link')?.classList.add('active');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 function filterProducts() {
     const query = document.getElementById('search-input').value.toLowerCase().trim();
-    let list    = selectedCategory === 'Todos' ? products : products.filter(p => p.category === selectedCategory);
-    if (query)  list = list.filter(p => p.name.toLowerCase().includes(query) || (p.description || '').toLowerCase().includes(query));
+    const list = query
+        ? products.filter(p => p.name.toLowerCase().includes(query) || (p.description || '').toLowerCase().includes(query))
+        : [...products];
     renderProducts(list);
 }
 
-/** Renderiza os cards de produto no grid principal */
+function renderCard(p) {
+    const color = COLORS[p.category] || '#6c757d';
+    const icon  = ICONS[p.category]  || '📦';
+    const out   = p.stock === 0;
+    const low   = p.stock > 0 && p.stock <= 3;
+    const pix   = (p.price * 0.95).toFixed(2).replace('.', ',');
+    const slug  = productSlug(p.name);
+    const flt   = out ? 'grayscale(1) opacity(.4)' : 'none';
+
+    const stockBadge = out
+        ? `<span class="stock-out small">Esgotado</span>`
+        : low
+        ? `<span class="stock-low small fw-semibold">Apenas ${p.stock} unid.</span>`
+        : `<span class="stock-ok small">${p.stock} em estoque</span>`;
+
+    return `
+    <div class="col-6 col-md-4 col-lg-3">
+        <div class="card h-100 product-card border-0 shadow-sm bg-white" onclick="openProduct(${p.id})" style="cursor:pointer">
+            <div class="product-img" style="background:#fff">
+                <img src="/images/${slug}.jpg" alt="${p.name}"
+                     style="width:100%;height:100%;object-fit:contain;padding:10px;filter:${flt}"
+                     onerror="this.parentElement.style.background='linear-gradient(135deg,${color}18,${color}08)';this.style.display='none';this.nextElementSibling.removeAttribute('hidden')">
+                <span hidden style="filter:${flt};font-size:3.8rem">${icon}</span>
+            </div>
+            <div class="card-body d-flex flex-column p-3">
+                <div class="d-flex align-items-center justify-content-between mb-1">
+                    <span class="badge rounded-pill" style="background:${color}20;color:${color};font-size:10px;font-weight:600">${p.category}</span>
+                    <div>${renderStars(p.id)}</div>
+                </div>
+                <p class="fw-semibold mb-1 lh-sm" style="font-size:13px;color:#0f172a">${p.name}</p>
+                <p class="text-muted flex-grow-1" style="font-size:11px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${p.description || ''}</p>
+                <div class="mt-2">
+                    <div class="mb-1">${stockBadge}</div>
+                    <div class="d-flex justify-content-between align-items-end mt-2">
+                        <div>
+                            <div class="price-tag">${fmt(p.price)}</div>
+                            ${!out ? `<div class="price-pix">R$ ${pix} no PIX</div>` : ''}
+                        </div>
+                        <button class="btn btn-dark btn-add" onclick="event.stopPropagation(); addItem(${p.id})" ${out ? 'disabled' : ''}>
+                            Adicionar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
 function renderProducts(list) {
+    const container = document.getElementById('product-sections');
+
     if (!list.length) {
-        document.getElementById('product-grid').innerHTML = `
-            <div class="col-12 text-center text-muted py-5">
-                <i class="bi bi-search" style="font-size:2rem;opacity:.3"></i>
-                <p class="mt-2 mb-0">Nenhum produto encontrado.</p>
+        container.innerHTML = `
+            <div class="text-center py-5">
+                <p class="text-muted fw-semibold mb-1">Nenhum produto encontrado.</p>
+                <small class="text-muted">Tente outra busca.</small>
             </div>`;
         return;
     }
 
-    document.getElementById('product-grid').innerHTML = list.map(p => {
-        const color = COLORS[p.category] || '#6c757d';
-        const icon  = ICONS[p.category]  || '📦';
-        const out   = p.stock === 0;         // sem estoque
-        const low   = p.stock > 0 && p.stock <= 3;  // estoque crítico
+    // Aplica ordenação
+    const sortVal = currentSort;
+    const sorted  = [...list];
+    if (sortVal === 'price-asc')  sorted.sort((a, b) => a.price - b.price);
+    if (sortVal === 'price-desc') sorted.sort((a, b) => b.price - a.price);
+    if (sortVal === 'name-asc')   sorted.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+    if (sortVal === 'name-desc')  sorted.sort((a, b) => b.name.localeCompare(a.name, 'pt-BR'));
 
+    // Ordem das categorias vem do array completo (não da lista filtrada) para ser estável
+    const catOrder   = [...new Set(products.map(p => p.category))];
+    const activeCats = catOrder.filter(cat => sorted.some(p => p.category === cat));
+
+    container.innerHTML = activeCats.map(cat => {
+        const catProducts = sorted.filter(p => p.category === cat);
+        const catId = productSlug(cat);
         return `
-        <div class="col-6 col-md-4 col-lg-3">
-            <div class="card h-100 product-card border-0 shadow-sm">
-                <div class="product-img rounded-top" style="background:${color}15">
-                    <span style="filter:${out ? 'grayscale(1) opacity(.35)' : 'none'}">${icon}</span>
+        <section id="cat-${catId}" class="product-section mb-5">
+            <h5 class="section-title">
+                ${ICONS[cat] ? `<span class="me-1">${ICONS[cat]}</span>` : ''}${cat}
+                <span class="text-muted fw-normal ms-2" style="font-size:13px">${catProducts.length} produto${catProducts.length !== 1 ? 's' : ''}</span>
+            </h5>
+            <div class="row g-3">${catProducts.map(renderCard).join('')}</div>
+        </section>`;
+    }).join('');
+}
+
+
+function openProduct(id) {
+    const p = products.find(p => p.id === id);
+    if (!p) return;
+
+    detailQty = 1;
+    const color       = COLORS[p.category] || '#6c757d';
+    const icon        = ICONS[p.category]  || '📦';
+    const out         = p.stock === 0;
+    const low         = p.stock > 0 && p.stock <= 5;
+    const pix         = (p.price * 0.95).toFixed(2).replace('.', ',');
+    const installment = (p.price / 10).toFixed(2).replace('.', ',');
+
+    const stockInfo = out
+        ? `<span class="text-muted" style="font-size:13px">Produto esgotado</span>`
+        : low
+        ? `<span style="color:#d97706;font-size:13px">Apenas ${p.stock} unidade${p.stock > 1 ? 's' : ''} disponível${p.stock > 1 ? 'is' : ''}</span>`
+        : `<span class="text-success" style="font-size:13px">${p.stock} unidades em estoque</span>`;
+
+    const slug      = productSlug(p.name);
+    const detFilter = out ? 'grayscale(1) opacity(.4)' : 'none';
+
+    document.getElementById('product-detail-section').innerHTML = `
+        <div class="container py-5">
+            <nav aria-label="breadcrumb" class="mb-4">
+                <ol class="breadcrumb" style="font-size:13px">
+                    <li class="breadcrumb-item"><a href="#" onclick="closeProduct();return false;">Produtos</a></li>
+                    <li class="breadcrumb-item text-muted">${p.category}</li>
+                    <li class="breadcrumb-item active">${p.name}</li>
+                </ol>
+            </nav>
+            <div class="row g-5 align-items-start">
+                <div class="col-md-5">
+                    <div class="detail-img" style="background:#fff">
+                        <img src="/images/${slug}.jpg" alt="${p.name}"
+                             style="width:100%;height:100%;object-fit:contain;padding:24px;filter:${detFilter}"
+                             onerror="this.parentElement.style.background='linear-gradient(135deg,${color}18,${color}06)';this.style.display='none';this.nextElementSibling.removeAttribute('hidden')">
+                        <span hidden style="filter:${detFilter}">${icon}</span>
+                    </div>
                 </div>
-                <div class="card-body d-flex flex-column p-3">
-                    <span class="badge mb-2" style="background:${color};font-size:10px;width:fit-content">${p.category}</span>
-                    <p class="fw-semibold mb-1 lh-sm" style="font-size:13px">${p.name}</p>
-                    <p class="text-muted mb-3 flex-grow-1" style="font-size:11px">${p.description || ''}</p>
-                    <div class="mt-auto">
-                        <p class="mb-2 small ${out ? 'text-muted' : low ? 'text-warning fw-semibold' : 'text-success'}">
-                            <i class="bi ${out ? 'bi-x-circle' : 'bi-check-circle'} me-1"></i>
-                            ${out ? 'Esgotado' : low ? `Só ${p.stock} restante${p.stock > 1 ? 's' : ''}` : `${p.stock} em estoque`}
-                        </p>
-                        <div class="d-flex justify-content-between align-items-center">
-                            <strong style="font-size:15px">${fmt(p.price)}</strong>
-                            <button class="btn btn-sm btn-dark" onclick="addItem(${p.id})" ${out ? 'disabled' : ''}>
-                                <i class="bi bi-cart-plus me-1"></i>Adicionar
-                            </button>
+                <div class="col-md-7">
+                    <span class="badge rounded-pill mb-2 d-inline-block"
+                          style="background:${color}18;color:${color};font-weight:600;font-size:12px;padding:5px 12px">${p.category}</span>
+                    <h1 class="fw-bold mb-2" style="font-size:1.6rem;color:#0f172a;line-height:1.3">${p.name}</h1>
+                    <div class="mb-3">${renderStars(p.id)}</div>
+                    <div class="mb-1">
+                        <span style="font-size:1.9rem;font-weight:700;color:#0f172a">${fmt(p.price)}</span>
+                    </div>
+                    ${!out ? `
+                    <p class="mb-1" style="color:#16a34a;font-size:13px">R$ ${pix} no PIX — 5% de desconto</p>
+                    <p class="mb-3" style="color:#64748b;font-size:13px">ou 10x de R$ ${installment} sem juros no cartão</p>` : ''}
+                    <div class="mb-4">${stockInfo}</div>
+                    <div class="d-flex align-items-center gap-3 mb-4"${out ? ' style="opacity:.5;pointer-events:none"' : ''}>
+                        <div class="d-flex align-items-center border rounded-pill px-3" style="height:40px;gap:14px">
+                            <button class="btn btn-link p-0 text-dark fw-bold" onclick="changeDetailQty(-1)"
+                                    style="font-size:20px;line-height:1;text-decoration:none">−</button>
+                            <span id="detail-qty" style="min-width:22px;text-align:center;font-weight:600;font-size:15px">1</span>
+                            <button class="btn btn-link p-0 text-dark fw-bold" onclick="changeDetailQty(1)"
+                                    style="font-size:20px;line-height:1;text-decoration:none">+</button>
+                        </div>
+                        <button class="btn btn-dark px-4 py-2" onclick="addItemDetail(${p.id})">
+                            Adicionar ao carrinho
+                        </button>
+                    </div>
+                    <div class="row g-2 mb-4">
+                        <div class="col-6">
+                            <div class="d-flex align-items-start gap-2 p-2 rounded" style="background:#f8fafc">
+                                <span style="font-size:16px">🚚</span>
+                                <div>
+                                    <p class="mb-0 fw-semibold" style="font-size:11px">Frete grátis</p>
+                                    <p class="mb-0 text-muted" style="font-size:10px">para todo o Brasil</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="d-flex align-items-start gap-2 p-2 rounded" style="background:#f8fafc">
+                                <span style="font-size:16px">🔄</span>
+                                <div>
+                                    <p class="mb-0 fw-semibold" style="font-size:11px">Devolução grátis</p>
+                                    <p class="mb-0 text-muted" style="font-size:10px">até 30 dias</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="d-flex align-items-start gap-2 p-2 rounded" style="background:#f8fafc">
+                                <span style="font-size:16px">💳</span>
+                                <div>
+                                    <p class="mb-0 fw-semibold" style="font-size:11px">Parcele em 10x</p>
+                                    <p class="mb-0 text-muted" style="font-size:10px">sem juros no cartão</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="d-flex align-items-start gap-2 p-2 rounded" style="background:#f8fafc">
+                                <span style="font-size:16px">🛡️</span>
+                                <div>
+                                    <p class="mb-0 fw-semibold" style="font-size:11px">Garantia</p>
+                                    <p class="mb-0 text-muted" style="font-size:10px">12 meses no fabricante</p>
+                                </div>
+                            </div>
                         </div>
                     </div>
+                    <div class="border-top pt-4">
+                        <h6 class="fw-bold mb-2" style="font-size:14px;color:#0f172a">Sobre o produto</h6>
+                        <p style="color:#475569;line-height:1.75;font-size:14px">${p.description || ''}</p>
+                    </div>
+                    <button class="btn btn-link p-0 text-muted" onclick="closeProduct()"
+                            style="font-size:13px;text-decoration:none">← Voltar para produtos</button>
                 </div>
             </div>
         </div>`;
-    }).join('');
+
+    document.getElementById('product-grid-section').classList.add('d-none');
+    document.getElementById('product-detail-section').classList.remove('d-none');
+    window.scrollTo(0, 0);
+}
+
+function closeProduct() {
+    document.getElementById('product-detail-section').classList.add('d-none');
+    document.getElementById('product-grid-section').classList.remove('d-none');
+}
+
+function changeDetailQty(delta) {
+    detailQty = Math.max(1, detailQty + delta);
+    const el = document.getElementById('detail-qty');
+    if (el) el.textContent = detailQty;
+}
+
+async function addItemDetail(productId) {
+    if (!authToken) { toast('Faça login para adicionar itens ao carrinho', 'warning'); openAuth('login'); return; }
+    try {
+        const res = await fetch(`${API.cart}/cart/${currentUser.id}/items`, {
+            method:  'POST',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body:    JSON.stringify({ product_id: productId, quantity: detailQty }),
+        });
+        if (res.status === 401) { logout(); return; }
+        const data = await res.json();
+        if (!res.ok) { toast(data.detail, 'danger'); return; }
+        cart = data;
+        syncBadge();
+        toast(`${detailQty} item${detailQty > 1 ? 'ns' : ''} adicionado${detailQty > 1 ? 's' : ''} ao carrinho`, 'success');
+    } catch {
+        toast('Carrinho indisponível', 'danger');
+    }
 }
 
 
 // ── Cart ──────────────────────────────────────────────────────────────────────
 
-/** Carrega o estado atual do carrinho do cart-service (requer login) */
 async function loadCart() {
     if (!authToken) { cart = { items: [], total: 0 }; syncBadge(); return; }
     try {
@@ -182,7 +406,6 @@ async function loadCart() {
     } catch { /* carrinho offline: ignora silenciosamente */ }
 }
 
-/** Envia requisição para adicionar um produto ao carrinho (requer login) */
 async function addItem(productId) {
     if (!authToken) { toast('Faça login para adicionar itens ao carrinho', 'warning'); openAuth('login'); return; }
     try {
@@ -202,7 +425,6 @@ async function addItem(productId) {
     }
 }
 
-/** Remove um produto do carrinho */
 async function removeItem(productId) {
     try {
         const res  = await fetch(`${API.cart}/cart/${currentUser.id}/items/${productId}`, {
@@ -217,7 +439,6 @@ async function removeItem(productId) {
     }
 }
 
-/** Atualiza o badge de quantidade no ícone do carrinho na navbar */
 function syncBadge() {
     const count = (cart.items || []).reduce((s, i) => s + i.quantity, 0);
     const el    = document.getElementById('badge-count');
@@ -225,13 +446,11 @@ function syncBadge() {
     el.classList.toggle('d-none', count === 0);
 }
 
-/** Abre o painel lateral do carrinho */
 function openCart() {
     renderCart();
     new bootstrap.Offcanvas(document.getElementById('offcanvasCart')).show();
 }
 
-/** Renderiza os itens do carrinho no offcanvas lateral */
 function renderCart() {
     const items = cart.items || [];
     document.getElementById('cart-total').textContent = fmt(cart.total || 0);
@@ -267,7 +486,6 @@ function renderCart() {
     }).join('');
 }
 
-/** Busca a categoria de um produto pelo ID na lista em memória */
 function getCategory(productId) {
     return (products.find(p => p.id === productId) || {}).category;
 }
@@ -275,9 +493,8 @@ function getCategory(productId) {
 
 // ── Checkout ──────────────────────────────────────────────────────────────────
 
-/** Abre o modal de checkout com o resumo do pedido */
 function openCheckout() {
-    checkoutKey = crypto.randomUUID();  // nova chave por tentativa de checkout
+    checkoutKey = crypto.randomUUID();
     bootstrap.Offcanvas.getInstance(document.getElementById('offcanvasCart'))?.hide();
 
     // Reseta seleção de método de pagamento
@@ -288,7 +505,8 @@ function openCheckout() {
     document.getElementById('btn-confirm-payment').disabled = true;
 
     // Monta tabela com resumo dos itens do pedido
-    const items = cart.items || [];
+    const items    = cart.items || [];
+    const subtotal = cart.total || 0;
     document.getElementById('order-summary').innerHTML = `
         <table class="table table-sm table-borderless mb-0">
             <tbody>${items.map(i => `
@@ -300,9 +518,13 @@ function openCheckout() {
                 </tr>`).join('')}
             </tbody>
             <tfoot class="border-top">
+                <tr id="discount-row" class="text-success" style="display:none">
+                    <td class="ps-0" style="font-size:13px">Desconto PIX (5%)</td>
+                    <td class="text-end pe-0" style="font-size:13px">− ${fmt(subtotal * 0.05)}</td>
+                </tr>
                 <tr>
                     <td class="ps-0 fw-bold">Total</td>
-                    <td class="text-end pe-0 fw-bold">${fmt(cart.total || 0)}</td>
+                    <td class="text-end pe-0 fw-bold" id="order-total-display">${fmt(subtotal)}</td>
                 </tr>
             </tfoot>
         </table>`;
@@ -310,7 +532,6 @@ function openCheckout() {
     new bootstrap.Modal(document.getElementById('modalPayment')).show();
 }
 
-/** Marca o método de pagamento selecionado e habilita o botão de confirmar */
 function selectMethod(method) {
     paymentMethod = method;
     document.querySelectorAll('.method-btn').forEach(b => {
@@ -318,16 +539,20 @@ function selectMethod(method) {
     });
     document.getElementById(`m-${method}`).className = 'btn btn-dark btn-sm method-btn';
     document.getElementById('btn-confirm-payment').disabled = false;
+
+    const subtotal     = cart.total || 0;
+    const discountRow  = document.getElementById('discount-row');
+    const totalDisplay = document.getElementById('order-total-display');
+    if (discountRow && totalDisplay) {
+        const isPix = method === 'pix';
+        discountRow.style.display = isPix ? '' : 'none';
+        totalDisplay.textContent  = fmt(isPix ? subtotal * 0.95 : subtotal);
+    }
 }
 
 /**
- * Envia o checkout de forma assíncrona via mensageria.
- *
- * Fluxo:
- * 1. POST /checkout → cart-service publica no stream e retorna order_id imediatamente
- * 2. Fecha o modal e exibe spinner de "Aguardando..."
- * 3. Faz polling em GET /orders/{order_id} até o status sair de "processing"
- * 4. Exibe resultado no modal de resultado
+ * Checkout assíncrono: POST retorna imediatamente com order_id; depois faz polling
+ * em GET /orders/{order_id} até o payment-service processar e publicar o resultado.
  */
 async function confirmPayment() {
     const btn    = document.getElementById('btn-confirm-payment');
@@ -352,14 +577,13 @@ async function confirmPayment() {
         bootstrap.Modal.getInstance(document.getElementById('modalPayment'))?.hide();
         toast('Processando pagamento...', 'info');
 
-        // Polling até o payment-service processar e publicar o resultado
         const order = await pollOrderStatus(order_id);
 
         if (order.status === 'approved') {
             cart = { items: [], total: 0 };
             syncBadge();
-            // Aguarda 2.5s para o consumer do Redis processar o evento de estoque
-            // antes de recarregar os produtos (consistência eventual)
+            // Aguarda 2,5s para o consumer do Redis decrementar o estoque antes de recarregar
+            // — consistência eventual entre payment-service e catalog-service
             setTimeout(loadProducts, 2500);
         }
 
@@ -372,12 +596,8 @@ async function confirmPayment() {
     }
 }
 
-/**
- * Faz polling em GET /orders/{orderId} até o status sair de "processing".
- * Tenta até maxAttempts vezes com intervalo de intervalMs ms entre tentativas.
- * Se o tempo esgotar, retorna um pedido com status 'pending' para o usuário
- * verificar o histórico de pedidos.
- */
+// Tenta até 15 vezes (30s total). Se esgotar, devolve status 'pending' para o
+// usuário verificar o histórico — evita deixar a tela travada indefinidamente.
 async function pollOrderStatus(orderId, maxAttempts = 15, intervalMs = 2000) {
     for (let i = 0; i < maxAttempts; i++) {
         await new Promise(r => setTimeout(r, intervalMs));
@@ -397,7 +617,6 @@ async function pollOrderStatus(orderId, maxAttempts = 15, intervalMs = 2000) {
     };
 }
 
-/** Exibe o modal com o resultado do pagamento */
 function showResult(order) {
     const cfg = {
         approved: { icon: '✅', title: 'Pedido confirmado!',  color: 'text-success' },
@@ -418,13 +637,11 @@ function showResult(order) {
 
 // ── Orders ────────────────────────────────────────────────────────────────────
 
-/** Abre o painel de pedidos e carrega o histórico do usuário logado */
 function openOrders() {
     new bootstrap.Offcanvas(document.getElementById('offcanvasOrders')).show();
     loadOrders();
 }
 
-/** Busca o histórico de pagamentos do usuário no payment-service */
 async function loadOrders() {
     const container = document.getElementById('orders-list');
     container.innerHTML = '<div class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm"></div></div>';
@@ -438,7 +655,6 @@ async function loadOrders() {
     }
 }
 
-/** Renderiza a lista de pedidos do usuário, do mais recente para o mais antigo */
 function renderOrders(orders) {
     const container = document.getElementById('orders-list');
 
@@ -479,7 +695,6 @@ function renderOrders(orders) {
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
 
-/** Abre o painel administrativo na aba de cadastro de produto (requer role admin) */
 function openAdmin() {
     if (!currentUser || currentUser.role !== 'admin') {
         toast('Acesso restrito a administradores', 'danger');
@@ -489,7 +704,6 @@ function openAdmin() {
     new bootstrap.Offcanvas(document.getElementById('offcanvasAdmin')).show();
 }
 
-/** Alterna entre as abas do painel admin */
 function showAdminTab(tab) {
     document.getElementById('admin-add').classList.toggle('d-none',   tab !== 'add');
     document.getElementById('admin-stock').classList.toggle('d-none', tab !== 'stock');
@@ -498,7 +712,6 @@ function showAdminTab(tab) {
     if (tab === 'stock') renderAdminStock();
 }
 
-/** Envia formulário de cadastro de novo produto para o catalog-service */
 async function adminAddProduct(e) {
     e.preventDefault();
     const btn = document.getElementById('btn-add-product');
@@ -522,16 +735,15 @@ async function adminAddProduct(e) {
         if (!res.ok) { toast(data.detail || 'Erro ao adicionar', 'danger'); return; }
         toast(`"${data.name}" adicionado com sucesso!`, 'success');
         e.target.reset();
-        await loadProducts();  // atualiza o grid com o novo produto
+        await loadProducts();
     } catch {
         toast('Erro ao conectar ao catálogo', 'danger');
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-plus-lg me-1"></i>Adicionar Produto';
+        btn.innerHTML = 'Adicionar Produto';
     }
 }
 
-/** Carrega e renderiza a lista de produtos com campos de edição de estoque */
 async function renderAdminStock() {
     const container = document.getElementById('admin-stock-list');
     container.innerHTML = '<div class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm"></div></div>';
@@ -564,7 +776,6 @@ async function renderAdminStock() {
     }
 }
 
-/** Envia a atualização de estoque de um produto para o catalog-service */
 async function adminUpdateStock(productId) {
     const input    = document.getElementById(`stock-${productId}`);
     const newStock = parseInt(input.value);
@@ -580,7 +791,7 @@ async function adminUpdateStock(productId) {
         const data = await res.json();
         if (!res.ok) { toast(data.detail || 'Erro ao atualizar', 'danger'); return; }
         toast(`${data.name}: estoque atualizado para ${data.stock} un.`, 'success');
-        await loadProducts();  // reflete a mudança no grid
+        await loadProducts();
     } catch {
         toast('Erro ao conectar ao catálogo', 'danger');
     }
@@ -589,7 +800,6 @@ async function adminUpdateStock(productId) {
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-/** Atualiza o botão/área de sessão na navbar (login ou perfil + sair) */
 function renderAuthArea() {
     const el = document.getElementById('auth-area');
     if (currentUser) {
@@ -601,7 +811,7 @@ function renderAuthArea() {
                 <ul class="dropdown-menu dropdown-menu-end">
                     <li><span class="dropdown-item-text small text-muted">${currentUser.role === 'admin' ? 'Administrador' : 'Cliente'}</span></li>
                     <li><hr class="dropdown-divider"></li>
-                    <li><button class="dropdown-item" onclick="openOrders()"><i class="bi bi-receipt me-2"></i>Meus Pedidos</button></li>
+                    <li><button class="dropdown-item" onclick="openOrders()">Meus Pedidos</button></li>
                     <li><hr class="dropdown-divider"></li>
                     <li><button class="dropdown-item" onclick="logout()">Sair</button></li>
                 </ul>
@@ -611,13 +821,11 @@ function renderAuthArea() {
     }
 }
 
-/** Abre o modal de autenticação na aba indicada ('login' ou 'register') */
 function openAuth(tab) {
     showAuthTab(tab);
     new bootstrap.Modal(document.getElementById('modalAuth')).show();
 }
 
-/** Alterna entre as abas de login e registro do modal de autenticação */
 function showAuthTab(tab) {
     document.getElementById('auth-form-login').classList.toggle('d-none', tab !== 'login');
     document.getElementById('auth-form-register').classList.toggle('d-none', tab !== 'register');
@@ -625,7 +833,6 @@ function showAuthTab(tab) {
     document.getElementById('auth-tab-register').classList.toggle('active', tab === 'register');
 }
 
-/** Persiste o token e os dados do usuário autenticado */
 function setSession(token, user) {
     authToken   = token;
     currentUser = user;
@@ -634,7 +841,6 @@ function setSession(token, user) {
     renderAuthArea();
 }
 
-/** Encerra a sessão atual e limpa o carrinho exibido */
 function logout() {
     authToken   = null;
     currentUser = null;
@@ -645,7 +851,6 @@ function logout() {
     renderAuthArea();
 }
 
-/** Autentica no auth-service e inicia a sessão */
 async function doLogin(e) {
     e.preventDefault();
     const btn = document.getElementById('btn-login');
@@ -673,7 +878,6 @@ async function doLogin(e) {
     }
 }
 
-/** Cria uma nova conta no auth-service e já inicia a sessão */
 async function doRegister(e) {
     e.preventDefault();
     const btn = document.getElementById('btn-register');
@@ -708,15 +912,10 @@ async function doRegister(e) {
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
-/** Formata um valor numérico como moeda brasileira (R$) */
 function fmt(val) {
     return Number(val).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-/**
- * Exibe uma notificação temporária (toast) no canto inferior direito.
- * Remove-se automaticamente após 3,2 segundos.
- */
 function toast(msg, type = 'secondary') {
     const el = document.createElement('div');
     el.className = `toast align-items-center text-bg-${type} border-0 show mb-2`;

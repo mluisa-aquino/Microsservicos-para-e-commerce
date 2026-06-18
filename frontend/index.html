@@ -3,27 +3,126 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ShopMicro</title>
+    <title>Loja Tech</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <style>
-        body { background: #f8f9fa; }
+        :root {
+            --brand: #111827;
+            --brand-accent: #3b82f6;
+        }
 
-        .navbar-search .form-control { border-radius: 0 4px 4px 0; }
-        .navbar-search .input-group-text { background: #fff; border-right: 0; border-radius: 4px 0 0 4px; }
-        .navbar-search .form-control:focus { box-shadow: none; border-color: #ced4da; }
+        body { background: #f1f5f9; font-family: 'Segoe UI', system-ui, sans-serif; display: flex; flex-direction: column; min-height: 100vh; }
+        #product-grid-section { flex: 1; }
+        #product-detail-section { flex: 1; }
 
-        .product-card { transition: box-shadow .15s, transform .15s; }
-        .product-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.1) !important; transform: translateY(-2px); }
+        /* ── Navbar ── */
+        .navbar { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%) !important; }
+        .navbar-brand span { color: var(--brand-accent); }
+        .navbar-search .form-control {
+            border-radius: 0 8px 8px 0;
+            border-left: 0;
+            background: #1e293b;
+            color: #e2e8f0;
+            border-color: #334155;
+        }
+        .navbar-search .form-control::placeholder { color: #64748b; }
+        .navbar-search .form-control:focus { box-shadow: none; border-color: var(--brand-accent); background: #1e293b; }
+        .navbar-search .input-group-text {
+            background: #1e293b;
+            border-color: #334155;
+            border-right: 0;
+            border-radius: 8px 0 0 8px;
+            color: #64748b;
+        }
 
-        .product-img {
-            height: 160px;
+        /* ── Promo bar ── */
+        .promo-bar {
+            background: #0f172a;
+            color: #94a3b8;
+            text-align: center;
+            padding: 8px 0;
+            font-size: 12px;
+            border-bottom: 1px solid #1e293b;
+        }
+
+        /* ── Product detail ── */
+        #product-detail-section { background: #f8fafc; min-height: 70vh; }
+        .detail-img {
+            border-radius: 16px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 3.5rem;
+            font-size: 8rem;
+            min-height: 280px;
+            overflow: hidden;
+        }
+        .detail-img img { border-radius: 16px; }
+        .product-img img { display: block; }
+
+        /* ── Category nav ── */
+        .cat-nav {
+            position: sticky;
+            top: 52px;
+            z-index: 100;
+            background: #fff;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .cat-nav-inner {
+            display: flex;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+        .cat-nav-inner::-webkit-scrollbar { display: none; }
+        .cat-link {
+            display: inline-block;
+            padding: 11px 16px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #64748b;
+            text-decoration: none;
+            border-bottom: 2px solid transparent;
+            white-space: nowrap;
+            transition: color .15s;
+        }
+        .cat-link:hover { color: #0f172a; }
+        .cat-link.active { color: #0f172a; border-bottom-color: #0f172a; font-weight: 600; }
+
+        /* ── Product sections ── */
+        .product-section { scroll-margin-top: 108px; }
+        .section-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #0f172a;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e2e8f0;
+            margin-bottom: 16px;
         }
 
+        /* ── Product card ── */
+        .product-card {
+            transition: box-shadow .2s, transform .2s;
+            border-radius: 14px !important;
+            overflow: hidden;
+        }
+        .product-card:hover { box-shadow: 0 8px 28px rgba(0,0,0,.12) !important; transform: translateY(-3px); }
+
+        .product-img {
+            height: 150px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3.8rem;
+            position: relative;
+        }
+
+        .star { color: #f59e0b; font-size: 11px; }
+
+        .price-tag { font-size: 1.1rem; font-weight: 700; color: #0f172a; }
+        .price-pix { font-size: 10px; color: #16a34a; font-weight: 600; }
+
+        /* ── Badges ── */
         .badge-count {
             position: absolute;
             top: -6px; right: -6px;
@@ -34,37 +133,72 @@
             justify-content: center;
         }
 
-        .method-btn { min-width: 100px; }
-        #offcanvasCart  { width: 380px; }
-        #offcanvasAdmin { width: 420px; }
+        /* ── Cart offcanvas ── */
+        #offcanvasCart  { width: 400px; }
+        #offcanvasAdmin { width: 440px; }
+        #offcanvasOrders { width: 420px; }
+
+        .method-btn { min-width: 100px; border-radius: 8px !important; }
+
+        /* ── Skeleton ── */
+        .skeleton {
+            background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.4s infinite;
+            border-radius: 8px;
+        }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+
+        .skeleton-card { height: 280px; border-radius: 14px; }
+
+        /* ── Misc ── */
+        .stock-low  { color: #d97706; }
+        .stock-ok   { color: #16a34a; }
+        .stock-out  { color: #94a3b8; }
+
+        .btn-add {
+            border-radius: 8px !important;
+            font-size: 12px !important;
+            padding: 5px 12px !important;
+        }
+
+        /* ── Sort dropdown ── */
+        .sort-btn { background: #fff; color: #374151; font-size: 13px; font-weight: 500; }
+        .sort-btn:hover { background: #f8fafc; color: #0f172a; }
+        .sort-menu { border-radius: 12px !important; padding: 6px !important; min-width: 160px; }
+        .sort-item { border-radius: 8px; font-size: 13px; color: #374151; }
+        .sort-item:hover { background: #f1f5f9 !important; color: #0f172a !important; }
+        .sort-item.active { background: #0f172a !important; color: #fff !important; }
+
+        footer { background: #0f172a; color: #64748b; }
+        footer a { color: #64748b; text-decoration: none; }
+        footer a:hover { color: var(--brand-accent); }
     </style>
 </head>
 <body>
 
 <!-- Navbar -->
-<nav class="navbar navbar-dark bg-dark shadow-sm sticky-top py-2">
+<nav class="navbar navbar-dark shadow-sm sticky-top py-2">
     <div class="container gap-3 flex-nowrap">
-        <a class="navbar-brand fw-bold fs-5 flex-shrink-0" href="#">
-            <i class="bi bi-box-seam me-1"></i>ShopMicro
+        <a class="navbar-brand fw-bold fs-5 flex-shrink-0" href="#" onclick="goHome(); return false;">
+            <i class="bi bi-box-seam-fill me-1" style="color:#3b82f6"></i>Loja<span>Tech</span>
         </a>
 
         <div class="input-group navbar-search flex-grow-1">
-            <span class="input-group-text text-muted border-end-0">
-                <i class="bi bi-search"></i>
-            </span>
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
             <input type="text" class="form-control" id="search-input"
-                   placeholder="Buscar produtos..." oninput="filterProducts()">
+                   placeholder="Buscar produtos, marcas..." oninput="filterProducts()">
         </div>
 
         <div class="d-flex align-items-center gap-2 flex-shrink-0">
             <span id="service-status"></span>
             <span id="auth-area"></span>
             <button class="btn btn-outline-secondary btn-sm" onclick="openAdmin()" title="Painel Admin">
-                <i class="bi bi-gear"></i>
+                <i class="bi bi-gear-fill"></i>
             </button>
             <div class="position-relative">
-                <button class="btn btn-outline-light btn-sm" onclick="openCart()">
-                    <i class="bi bi-cart3 fs-6"></i>
+                <button class="btn btn-primary btn-sm px-3" onclick="openCart()">
+                    <i class="bi bi-cart3 me-1"></i><span id="cart-label">Carrinho</span>
                 </button>
                 <span class="badge bg-danger badge-count rounded-pill d-none" id="badge-count">0</span>
             </div>
@@ -72,29 +206,73 @@
     </div>
 </nav>
 
+
+<!-- Category nav -->
+<nav id="cat-nav" class="cat-nav shadow-sm"></nav>
+
+<!-- Product detail section (oculto por padrão) -->
+<section id="product-detail-section" class="d-none"></section>
+
 <!-- Main -->
-<div class="container my-4">
-    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-        <div class="d-flex flex-wrap gap-2" id="category-filters"></div>
+<div class="container my-4" id="product-grid-section">
+
+    <!-- Controls row -->
+    <div class="d-flex align-items-center justify-content-between mb-4">
         <small class="text-muted" id="product-info">carregando...</small>
+        <div class="d-flex align-items-center gap-2">
+            <span style="font-size:13px;color:#94a3b8">Ordenar por</span>
+            <div class="dropdown">
+                <button class="btn btn-white btn-sm border sort-btn dropdown-toggle px-3" type="button"
+                        id="sort-label" data-bs-toggle="dropdown">
+                    Mais relevante
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end sort-menu shadow border-0">
+                    <li><button class="dropdown-item sort-item active" onclick="applySort('default','Mais relevante')">Mais relevante</button></li>
+                    <li><button class="dropdown-item sort-item" onclick="applySort('price-asc','Menor preço')">Menor preço</button></li>
+                    <li><button class="dropdown-item sort-item" onclick="applySort('price-desc','Maior preço')">Maior preço</button></li>
+                    <li><hr class="dropdown-divider my-1"></li>
+                    <li><button class="dropdown-item sort-item" onclick="applySort('name-asc','A–Z')">Nome A–Z</button></li>
+                    <li><button class="dropdown-item sort-item" onclick="applySort('name-desc','Z–A')">Nome Z–A</button></li>
+                </ul>
+            </div>
+        </div>
     </div>
 
-    <div class="row g-3" id="product-grid">
-        <div class="col-12 text-center py-5 text-muted">
-            <div class="spinner-border spinner-border-sm me-2"></div>carregando produtos...
+    <!-- Product sections -->
+    <div id="product-sections">
+        <div class="row g-3">
+            <div class="col-6 col-md-4 col-lg-3"><div class="skeleton skeleton-card"></div></div>
+            <div class="col-6 col-md-4 col-lg-3"><div class="skeleton skeleton-card"></div></div>
+            <div class="col-6 col-md-4 col-lg-3 d-none d-md-block"><div class="skeleton skeleton-card"></div></div>
+            <div class="col-6 col-md-4 col-lg-3 d-none d-lg-block"><div class="skeleton skeleton-card"></div></div>
         </div>
     </div>
 </div>
 
+
 <!-- Footer -->
-<footer class="border-top bg-white py-4 mt-5">
-    <div class="container text-center text-muted small">
-        &copy; 2025 ShopMicro &mdash; Projeto de estudos de microsserviços
+<footer class="py-4 mt-5">
+    <div class="container">
+        <div class="row gy-3 align-items-center">
+            <div class="col-md-6">
+                <div class="fw-bold mb-1" style="color:#e2e8f0">
+                    <i class="bi bi-box-seam-fill me-1" style="color:#3b82f6"></i>Loja Tech
+                </div>
+                <small>Projeto de estudos em arquitetura de microsserviços.</small>
+            </div>
+            <div class="col-md-6 text-md-end small">
+                <span class="me-3">Pagamento seguro</span>
+                <span class="me-3">Entrega rápida</span>
+                <span>30 dias para trocar</span>
+            </div>
+        </div>
     </div>
 </footer>
 
 
-<!-- Offcanvas: Cart -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!--  Offcanvas: Cart                                               -->
+<!-- ══════════════════════════════════════════════════════════════ -->
 <div class="offcanvas offcanvas-end" id="offcanvasCart" tabindex="-1">
     <div class="offcanvas-header border-bottom">
         <h6 class="offcanvas-title fw-bold"><i class="bi bi-cart3 me-2"></i>Carrinho</h6>
@@ -105,17 +283,19 @@
         <div class="p-3 border-top bg-white">
             <div class="d-flex justify-content-between fw-bold mb-3">
                 <span>Total</span>
-                <span id="cart-total">R$ 0,00</span>
+                <span id="cart-total" class="text-primary">R$ 0,00</span>
             </div>
-            <button class="btn btn-dark w-100" id="btn-checkout" disabled onclick="openCheckout()">
-                <i class="bi bi-lock me-1"></i>Finalizar compra
+            <button class="btn btn-dark w-100 py-2" id="btn-checkout" disabled onclick="openCheckout()">
+                Finalizar compra
             </button>
         </div>
     </div>
 </div>
 
 
-<!-- Offcanvas: Orders -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!--  Offcanvas: Orders                                             -->
+<!-- ══════════════════════════════════════════════════════════════ -->
 <div class="offcanvas offcanvas-end" id="offcanvasOrders" tabindex="-1">
     <div class="offcanvas-header border-bottom">
         <h6 class="offcanvas-title fw-bold"><i class="bi bi-receipt me-2"></i>Meus Pedidos</h6>
@@ -127,33 +307,32 @@
 </div>
 
 
-<!-- Modal: Payment -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!--  Modal: Payment                                                -->
+<!-- ══════════════════════════════════════════════════════════════ -->
 <div class="modal fade" id="modalPayment" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
+        <div class="modal-content" style="border-radius:16px;overflow:hidden">
+            <div class="modal-header border-0 pb-0">
                 <h6 class="modal-title fw-bold">Resumo do pedido</h6>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <div id="order-summary" class="mb-3"></div>
-                <hr>
-                <p class="mb-2 fw-semibold small">Forma de pagamento</p>
+                <hr class="my-3">
+                <p class="mb-2 fw-semibold small text-muted text-uppercase" style="letter-spacing:.5px">
+                    Forma de pagamento
+                </p>
                 <div class="d-flex gap-2 flex-wrap">
-                    <button class="btn btn-outline-secondary btn-sm method-btn" id="m-pix"    onclick="selectMethod('pix')">
-                        <i class="bi bi-qr-code-scan me-1"></i>PIX
-                    </button>
-                    <button class="btn btn-outline-secondary btn-sm method-btn" id="m-card"   onclick="selectMethod('card')">
-                        <i class="bi bi-credit-card me-1"></i>Cartão
-                    </button>
-                    <button class="btn btn-outline-secondary btn-sm method-btn" id="m-boleto" onclick="selectMethod('boleto')">
-                        <i class="bi bi-upc me-1"></i>Boleto
-                    </button>
+                    <button class="btn btn-outline-secondary btn-sm method-btn" id="m-pix" onclick="selectMethod('pix')">PIX</button>
+                    <button class="btn btn-outline-secondary btn-sm method-btn" id="m-card" onclick="selectMethod('card')">Cartão</button>
+                    <button class="btn btn-outline-secondary btn-sm method-btn" id="m-boleto" onclick="selectMethod('boleto')">Boleto</button>
                 </div>
+                <p class="text-muted mt-2 mb-0" style="font-size:11px">Pagamento processado com segurança</p>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer border-0 pt-0">
                 <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Voltar</button>
-                <button class="btn btn-dark btn-sm" id="btn-confirm-payment" disabled onclick="confirmPayment()">
+                <button class="btn btn-primary btn-sm px-4" id="btn-confirm-payment" disabled onclick="confirmPayment()">
                     Confirmar pagamento
                 </button>
             </div>
@@ -162,12 +341,14 @@
 </div>
 
 
-<!-- Modal: Payment result -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!--  Modal: Payment result                                         -->
+<!-- ══════════════════════════════════════════════════════════════ -->
 <div class="modal fade" id="modalResult" tabindex="-1" data-bs-backdrop="static">
     <div class="modal-dialog modal-dialog-centered modal-sm">
-        <div class="modal-content text-center p-4">
+        <div class="modal-content text-center p-4" style="border-radius:16px">
             <div id="payment-result"></div>
-            <button class="btn btn-dark btn-sm mt-3" data-bs-dismiss="modal">
+            <button class="btn btn-dark btn-sm mt-3 py-2" data-bs-dismiss="modal">
                 Continuar comprando
             </button>
         </div>
@@ -175,47 +356,53 @@
 </div>
 
 
-<!-- Modal: Auth -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!--  Modal: Auth                                                   -->
+<!-- ══════════════════════════════════════════════════════════════ -->
 <div class="modal fade" id="modalAuth" tabindex="-1" data-bs-backdrop="static">
     <div class="modal-dialog modal-dialog-centered modal-sm">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h6 class="modal-title fw-bold"><i class="bi bi-person-circle me-2"></i>Minha conta</h6>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="modal-content" style="border-radius:16px;overflow:hidden">
+            <div class="modal-header" style="background:#0f172a">
+                <h6 class="modal-title fw-bold text-white">Minha conta</h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
-            <div class="modal-body">
-                <ul class="nav nav-tabs mb-3">
+            <div class="modal-body p-4">
+                <ul class="nav nav-pills mb-3 justify-content-center">
                     <li class="nav-item">
-                        <button class="nav-link active" id="auth-tab-login" onclick="showAuthTab('login')">Entrar</button>
+                        <button class="nav-link active px-4" id="auth-tab-login" onclick="showAuthTab('login')">Entrar</button>
                     </li>
                     <li class="nav-item">
-                        <button class="nav-link" id="auth-tab-register" onclick="showAuthTab('register')">Criar conta</button>
+                        <button class="nav-link px-4" id="auth-tab-register" onclick="showAuthTab('register')">Criar conta</button>
                     </li>
                 </ul>
 
                 <form id="auth-form-login" onsubmit="doLogin(event)">
-                    <div class="mb-2">
+                    <div class="mb-3">
                         <label class="form-label small fw-semibold">E-mail</label>
-                        <input type="email" class="form-control form-control-sm" id="login-email" required>
+                        <input type="email" class="form-control" id="login-email" placeholder="seu@email.com" required>
                     </div>
                     <div class="mb-3">
                         <label class="form-label small fw-semibold">Senha</label>
-                        <input type="password" class="form-control form-control-sm" id="login-password" required>
+                        <input type="password" class="form-control" id="login-password" placeholder="••••••••" required>
                     </div>
-                    <button type="submit" class="btn btn-dark btn-sm w-100" id="btn-login">Entrar</button>
+                    <button type="submit" class="btn btn-primary w-100 py-2" id="btn-login">Entrar</button>
+                    <p class="text-center text-muted mt-3 mb-0" style="font-size:12px">
+                        Admin padrão: <code>admin@shopmicro.com</code> / <code>admin123</code>
+                    </p>
                 </form>
 
                 <form id="auth-form-register" class="d-none" onsubmit="doRegister(event)">
-                    <div class="mb-2">
+                    <div class="mb-3">
                         <label class="form-label small fw-semibold">E-mail</label>
-                        <input type="email" class="form-control form-control-sm" id="register-email" required>
+                        <input type="email" class="form-control" id="register-email" placeholder="seu@email.com" required>
                     </div>
-                    <div class="mb-2">
+                    <div class="mb-3">
                         <label class="form-label small fw-semibold">Senha</label>
-                        <input type="password" class="form-control form-control-sm" id="register-password" minlength="8" required>
-                        <div class="form-text" style="font-size:11px">Mínimo de 8 caracteres, com letras e números.</div>
+                        <input type="password" class="form-control" id="register-password"
+                               placeholder="Mín. 8 caracteres com letras e números" minlength="8" required>
+                        <div class="form-text" style="font-size:11px">Mín. 8 caracteres, letras e números.</div>
                     </div>
-                    <button type="submit" class="btn btn-dark btn-sm w-100" id="btn-register">Criar conta</button>
+                    <button type="submit" class="btn btn-primary w-100 py-2" id="btn-register">Criar conta</button>
                 </form>
             </div>
         </div>
@@ -223,23 +410,23 @@
 </div>
 
 
-<!-- Offcanvas: Admin -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!--  Offcanvas: Admin                                              -->
+<!-- ══════════════════════════════════════════════════════════════ -->
 <div class="offcanvas offcanvas-end" id="offcanvasAdmin" tabindex="-1">
-    <div class="offcanvas-header border-bottom">
-        <h6 class="offcanvas-title fw-bold"><i class="bi bi-gear me-2"></i>Painel Admin</h6>
-        <button type="button" class="btn-close" data-bs-dismiss="offcanvas"></button>
+    <div class="offcanvas-header border-bottom" style="background:#0f172a">
+        <h6 class="offcanvas-title fw-bold text-white">
+            <i class="bi bi-gear-fill me-2"></i>Painel Admin
+        </h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button>
     </div>
     <div class="offcanvas-body p-0">
         <ul class="nav nav-tabs px-3 pt-2">
             <li class="nav-item">
-                <button class="nav-link active" id="tab-add" onclick="showAdminTab('add')">
-                    <i class="bi bi-plus-circle me-1"></i>Novo Produto
-                </button>
+                <button class="nav-link active" id="tab-add" onclick="showAdminTab('add')">Novo Produto</button>
             </li>
             <li class="nav-item">
-                <button class="nav-link" id="tab-stock" onclick="showAdminTab('stock')">
-                    <i class="bi bi-boxes me-1"></i>Estoque
-                </button>
+                <button class="nav-link" id="tab-stock" onclick="showAdminTab('stock')">Estoque</button>
             </li>
         </ul>
 
@@ -255,7 +442,7 @@
                         <input type="number" class="form-control form-control-sm" id="a-price" min="0" step="0.01" required>
                     </div>
                     <div class="col-6">
-                        <label class="form-label small fw-semibold">Estoque inicial</label>
+                        <label class="form-label small fw-semibold">Estoque</label>
                         <input type="number" class="form-control form-control-sm" id="a-stock" min="0" required>
                     </div>
                 </div>
@@ -267,15 +454,17 @@
                         <option>Periféricos</option>
                         <option>Monitores</option>
                         <option>Áudio</option>
+                        <option>Celulares</option>
+                        <option>Games</option>
+                        <option>Câmeras</option>
+                        <option>Armazenamento</option>
                     </select>
                 </div>
                 <div class="mb-3">
                     <label class="form-label small fw-semibold">Descrição</label>
                     <textarea class="form-control form-control-sm" id="a-description" rows="2" required></textarea>
                 </div>
-                <button type="submit" class="btn btn-dark btn-sm w-100" id="btn-add-product">
-                    <i class="bi bi-plus-lg me-1"></i>Adicionar Produto
-                </button>
+                <button type="submit" class="btn btn-dark btn-sm w-100 py-2" id="btn-add-product">Adicionar Produto</button>
             </form>
         </div>
 

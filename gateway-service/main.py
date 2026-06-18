@@ -1,19 +1,12 @@
 """
-Gateway Service
----------------
-API Gateway que atua como ponto de entrada centralizado para os demais serviços.
+Gateway Service — porta 8000
 
-Funcionalidades:
-- Proxy reverso para catalog-service, cart-service, payment-service e auth-service
-- Validação de JWT na 1ª camada (antes de rotear — defesa em profundidade)
-- Middleware de logging com rastreamento por Request ID
-- Health check agregado em paralelo (asyncio.gather) de todos os serviços
-- Injeção do cabeçalho X-Request-ID para rastrear requisições entre serviços
+Ponto de entrada único para todos os microsserviços (padrão API Gateway).
+O cliente conhece apenas o endereço do gateway; os endereços internos ficam opacos.
 
-O padrão API Gateway reduz o acoplamento entre o frontend e os microsserviços:
-o cliente conhece apenas o endereço do gateway, não os endereços internos.
-
-Porta padrão: 8000
+Valida o JWT antes de rotear (1ª camada); cada serviço interno valida de novo
+de forma independente (2ª camada — defesa em profundidade).
+X-Request-ID é propagado para rastrear uma requisição por todos os serviços nos logs.
 """
 
 import asyncio
@@ -50,13 +43,8 @@ logger = logging.getLogger("api-gateway")
 @app.middleware("http")
 async def add_request_id_and_log(request: Request, call_next):
     """
-    Middleware executado em todas as requisições recebidas pelo gateway.
-
-    Responsabilidades:
-    1. Gera ou propaga o X-Request-ID para rastreamento distribuído
-       (se o cliente enviar o header, reutiliza; caso contrário, gera um novo)
-    2. Registra entrada e saída de cada requisição com tempo de resposta
-    3. Adiciona o Request-ID no cabeçalho da resposta para o cliente rastrear
+    Gera ou propaga o X-Request-ID e registra cada requisição com tempo de resposta.
+    Se o cliente enviar o header, ele é reutilizado; caso contrário, um novo é gerado.
     """
     request_id = request.headers.get("x-request-id", str(uuid.uuid4())[:8])
     request.state.request_id = request_id
@@ -79,11 +67,7 @@ async def add_request_id_and_log(request: Request, call_next):
 
 
 def require_auth(authorization: str = Header(None)) -> dict:
-    """
-    Dependency aplicada às rotas de proxy que exigem usuário autenticado.
-    Esta é a 1ª camada de validação do JWT; o serviço interno valida de novo
-    de forma independente quando a requisição chega até ele.
-    """
+    # 1ª camada de validação; o serviço interno ainda valida de forma independente
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.removeprefix("Bearer ").strip()
@@ -97,16 +81,14 @@ def require_auth(authorization: str = Header(None)) -> dict:
 
 @app.get("/health")
 def health_check():
-    """Health check do próprio gateway."""
     return {"status": "ok", "service": "gateway-service"}
 
 
 @app.get("/services/health")
 async def services_health(request: Request):
     """
-    Verifica o status de todos os microsserviços em paralelo via asyncio.gather.
-    Retorna 'degraded' se qualquer serviço estiver indisponível.
-    Útil para monitoramento e diagnóstico do sistema.
+    Verifica todos os microsserviços em paralelo via asyncio.gather.
+    Retorna 'degraded' se qualquer serviço estiver fora do ar.
     """
     services = {
         "catalogo-service": CATALOGO_URL,
@@ -117,8 +99,7 @@ async def services_health(request: Request):
 
     request_id = request.state.request_id
 
-    # Dispara todos os health checks em paralelo — sem esperar um terminar para
-    # iniciar o próximo. Reduz o tempo de resposta de soma(latências) para max(latência).
+    # asyncio.gather dispara todos em paralelo: tempo de resposta = max(latências), não soma
     async with httpx.AsyncClient(timeout=3.0) as client:
         async def check(name: str, url: str):
             try:
@@ -139,11 +120,8 @@ async def services_health(request: Request):
 
 async def proxy(request: Request, service_name: str, base_url: str, path: str):
     """
-    Encaminha uma requisição HTTP para o serviço interno correspondente.
-
-    Preserva método, query params, headers e body da requisição original.
-    Remove o header 'host' para evitar conflito com o host do serviço destino.
-    Em caso de falha de conexão, retorna HTTP 503 com mensagem descritiva.
+    Encaminha a requisição para o serviço interno preservando método, params,
+    headers e body. Remove o header 'host' para evitar conflito com o destino.
     """
     request_id = request.state.request_id
     started_at = time.perf_counter()
@@ -157,7 +135,6 @@ async def proxy(request: Request, service_name: str, base_url: str, path: str):
     async with httpx.AsyncClient(timeout=10.0) as client:
         body = await request.body()
 
-        # Filtra o header 'host' para que o serviço destino receba o seu próprio host
         headers = {
             key: value
             for key, value in request.headers.items()
@@ -188,7 +165,6 @@ async def proxy(request: Request, service_name: str, base_url: str, path: str):
         request.method, request.url.path, elapsed_ms,
     )
 
-    # Constrói a resposta preservando status, conteúdo e content-type do serviço interno
     proxy_response = Response(
         content=response.content,
         status_code=response.status_code,
@@ -203,30 +179,23 @@ async def proxy(request: Request, service_name: str, base_url: str, path: str):
 @app.api_route("/produtos", methods=["GET"])
 @app.api_route("/produtos/{path:path}", methods=["GET"])
 async def catalogo_proxy(request: Request, path: str = ""):
-    """Encaminha requisições de produtos para o catalog-service."""
     suffix = f"/produtos/{path}" if path else "/produtos"
     return await proxy(request, "catalogo-service", CATALOGO_URL, suffix)
 
 
 @app.api_route("/carrinho/{path:path}", methods=["GET", "POST", "DELETE"])
 async def carrinho_proxy(request: Request, path: str, _: dict = Depends(require_auth)):
-    """Encaminha requisições de carrinho para o cart-service. Exige usuário autenticado."""
     return await proxy(request, "carrinho-service", CARRINHO_URL, f"/carrinho/{path}")
 
 
 @app.api_route("/pagamento", methods=["GET"])
 @app.api_route("/pagamento/{path:path}", methods=["GET", "POST"])
 async def pagamento_proxy(request: Request, path: str = "", _: dict = Depends(require_auth)):
-    """Encaminha requisições de pagamento para o payment-service. Exige usuário autenticado."""
     suffix = f"/pagamento/{path}" if path else "/pagamento"
     return await proxy(request, "pagamento-service", PAGAMENTO_URL, suffix)
 
 
 @app.api_route("/auth/{path:path}", methods=["GET", "POST"])
 async def auth_proxy(request: Request, path: str):
-    """
-    Encaminha requisições de autenticação para o auth-service.
-    Não exige token: é exatamente aqui que ele é obtido (registro/login),
-    exceto em /auth/me, cuja validação é feita pelo próprio auth-service.
-    """
+    # Sem exigência de token: é aqui que o token é obtido (login/registro)
     return await proxy(request, "auth-service", AUTH_URL, f"/auth/{path}")

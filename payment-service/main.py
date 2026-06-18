@@ -1,24 +1,15 @@
 """
-Payment Service
----------------
-Responsável por processar pagamentos, persistir pedidos e publicar
-eventos de resultado via Redis Streams.
+Payment Service — porta 8003
 
-Funcionalidades:
-- Consumo assíncrono de eventos 'checkout.requested' do stream 'checkout'
-- Processamento de pagamentos com simulação de aprovação/recusa
-- Autenticação via JWT no endpoint HTTP (mantido para testes diretos)
-- Persistência de pedidos em PostgreSQL
-- Publicação de 'payment.processed' em 'payment_results' (para cart-service)
-- Publicação de 'payment_approved' em 'payments' (para catalog-service)
-- Chave de idempotência: evita reprocessamento em caso de reentrega pelo stream
-- Consumer name dinâmico por hostname — seguro para escalar com --scale
+Processa pagamentos consumindo o stream 'checkout' (publicado pelo cart-service),
+persiste pedidos em PostgreSQL e publica resultados em dois streams:
+- 'payment_results' → cart-service (atualiza status do pedido)
+- 'payments'        → catalog-service (decrementa estoque)
 
-Lógica de aprovação simulada:
-- PIX e Cartão: 90% de taxa de aprovação
-- Boleto: sempre gera status 'pending'
+Idempotência via Redis: se o stream reenviar uma mensagem já processada,
+o resultado em cache é republicado sem gravar novamente no banco.
 
-Porta padrão: 8003
+Aprovação simulada: PIX e cartão têm 90% de aprovação; boleto fica 'pending'.
 """
 
 import os
@@ -115,19 +106,11 @@ def _persist_payment(payment_id: str, user_id: str, items: list, total: float,
 
 def checkout_consumer():
     """
-    Worker em background que consome pedidos de checkout do Redis Stream.
-
-    Fluxo:
-    1. Aguarda eventos 'checkout.requested' publicados pelo cart-service
-    2. Verifica idempotência via Redis (evita processar o mesmo order_id duas vezes)
-    3. Processa o pagamento (simulação) e persiste no PostgreSQL
-    4. Publica 'payment.processed' em 'payment_results' para o cart-service
-    5. Se aprovado, publica 'payment_approved' em 'payments' para o catalog-service
-    6. Confirma processamento com XACK
-
-    A idempotência aqui é importante: se o consumer crashar após processar
-    mas antes do XACK, o stream reentregará a mensagem. Sem essa checagem,
-    o mesmo pedido seria cobrado duas vezes.
+    Consome pedidos do stream 'checkout', processa o pagamento e publica
+    o resultado nos streams de saída. A checagem de idempotência (Redis cache
+    por order_id) protege contra o cenário em que o consumer cai após processar
+    mas antes do XACK — nesse caso o stream reenvia a mensagem, mas o resultado
+    já cacheado é republicado sem cobrar duas vezes.
     """
     r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -172,7 +155,8 @@ def checkout_consumer():
                             r.xack(CHECKOUT_STREAM, CHECKOUT_CONSUMER_GROUP, msg_id)
                             continue
 
-                        total      = sum(i["unit_price"] * i["quantity"] for i in items)
+                        subtotal   = sum(i["unit_price"] * i["quantity"] for i in items)
+                        total      = round(subtotal * 0.95, 2) if payment_method == "pix" else round(subtotal, 2)
                         payment_id = str(uuid.uuid4())[:8].upper()
                         status, message = _simulate_payment(payment_method)
 
@@ -213,7 +197,6 @@ def checkout_consumer():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Inicializa o banco e inicia o consumer de checkout em background."""
     init_db()
     threading.Thread(target=checkout_consumer, daemon=True).start()
     yield
@@ -228,7 +211,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # ── Autenticação (usada apenas no endpoint HTTP direto) ───────────────────────
 
 def get_current_user(authorization: str = Header(None)) -> dict:
-    """Dependency que extrai e valida o JWT do header Authorization: Bearer <token>."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.removeprefix("Bearer ").strip()
@@ -241,7 +223,6 @@ def get_current_user(authorization: str = Header(None)) -> dict:
 
 
 def require_owner(user_id: str, user: dict = Depends(get_current_user)) -> dict:
-    """Dependency que garante que o usuário só acesse os próprios pagamentos."""
     if user["sub"] != user_id and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="You can only access your own payments")
     return user
@@ -271,7 +252,6 @@ def health_check():
 
 @app.get("/payments/user/{user_id}")
 def get_user_payments(user_id: str, _: dict = Depends(require_owner)):
-    """Retorna o histórico de pagamentos de um usuário, ordenado do mais recente."""
     with get_db() as conn:
         rows = conn.execute(
             "SELECT * FROM payments WHERE user_id = %s ORDER BY created_at DESC", (user_id,)
@@ -281,7 +261,6 @@ def get_user_payments(user_id: str, _: dict = Depends(require_owner)):
 
 @app.get("/payments/{payment_id}")
 def get_payment(payment_id: str, user: dict = Depends(get_current_user)):
-    """Retorna os detalhes de um pagamento específico pelo seu ID."""
     with get_db() as conn:
         row = conn.execute(
             "SELECT * FROM payments WHERE payment_id = %s", (payment_id.upper(),)
@@ -295,10 +274,7 @@ def get_payment(payment_id: str, user: dict = Depends(get_current_user)):
 
 @app.post("/payments", status_code=201)
 def process_payment(req: PaymentRequest, request: Request, user: dict = Depends(get_current_user)):
-    """
-    Endpoint HTTP direto mantido para testes e uso externo.
-    O fluxo principal de checkout usa mensageria (stream 'checkout').
-    """
+    # Endpoint HTTP direto; o fluxo principal usa o stream 'checkout'
     idempotency_key = request.headers.get("idempotency-key")
 
     if idempotency_key:
@@ -317,7 +293,8 @@ def process_payment(req: PaymentRequest, request: Request, user: dict = Depends(
     if req.payment_method not in ACCEPTED_METHODS:
         raise HTTPException(status_code=400, detail=f"Invalid method. Accepted: {', '.join(ACCEPTED_METHODS)}")
 
-    total      = sum(i.unit_price * i.quantity for i in req.items)
+    subtotal   = sum(i.unit_price * i.quantity for i in req.items)
+    total      = round(subtotal * 0.95, 2) if req.payment_method == "pix" else round(subtotal, 2)
     payment_id = str(uuid.uuid4())[:8].upper()
     items_data = [i.model_dump() for i in req.items]
     status, message = _simulate_payment(req.payment_method)
