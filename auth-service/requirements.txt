@@ -1,0 +1,6 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+psycopg[binary]==3.3.4
+pyjwt==2.9.0
+bcrypt==4.2.0
+pydantic[email]==2.7.1
